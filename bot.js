@@ -66,6 +66,8 @@ const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
 const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 800);
 const STT_SCAN_SUBSCRIBE = isTruthy(process.env.TALK_CODING_STT_SCAN_SUBSCRIBE);
 const VOICE_DECRYPTION_FAILURE_TOLERANCE = Number(process.env.DISCORD_VOICE_DECRYPTION_FAILURE_TOLERANCE || 250);
+const VOICE_RECONNECT_INTERVAL_MS = Number(process.env.DISCORD_VOICE_RECONNECT_INTERVAL_MS || 5000);
+const VOICE_RECONNECT_READY_TIMEOUT_MS = Number(process.env.DISCORD_VOICE_RECONNECT_READY_TIMEOUT_MS || 45000);
 const VOICE_RECEIVE_USER_IDS = new Set(
   String(process.env.TALK_CODING_RECEIVE_USER_IDS || "")
     .split(",")
@@ -944,30 +946,51 @@ async function waitForVoiceReady(connection, guildId) {
 }
 
 function attachVoiceConnectionKeepAlive(connection, guildId) {
+  let reconnectTimer = null;
   let reconnecting = false;
-  connection.on("stateChange", async (_oldState, newState) => {
-    if (newState.status !== VoiceConnectionStatus.Disconnected || reconnecting) return;
-    if (connection.state.status === VoiceConnectionStatus.Destroyed) return;
+
+  const stopReconnectLoop = () => {
+    if (reconnectTimer) clearInterval(reconnectTimer);
+    reconnectTimer = null;
+  };
+
+  const tryReconnect = async () => {
+    if (reconnecting || connection.state.status === VoiceConnectionStatus.Destroyed) return;
+    if (connection.state.status === VoiceConnectionStatus.Ready) {
+      stopReconnectLoop();
+      return;
+    }
     reconnecting = true;
     try {
-      const movedOrKicked =
-        newState.reason === VoiceConnectionDisconnectReason.WebSocketClose && newState.closeCode === 4014;
-      if (movedOrKicked) {
-        try {
-          await entersState(connection, VoiceConnectionStatus.Signalling, 5000);
-        } catch {
-          connection.rejoin();
-        }
-      } else {
-        connection.rejoin();
-      }
-      await entersState(connection, VoiceConnectionStatus.Ready, 30000);
+      connection.rejoin();
+      await entersState(connection, VoiceConnectionStatus.Ready, VOICE_RECONNECT_READY_TIMEOUT_MS);
       console.log(`[voice] reconnected guild=${guildId}`);
+      stopReconnectLoop();
     } catch (error) {
       console.error(`[voice] reconnect failed guild=${guildId}:`, error?.stack || error);
     } finally {
       reconnecting = false;
     }
+  };
+
+  connection.on("stateChange", async (_oldState, newState) => {
+    if (newState.status === VoiceConnectionStatus.Ready) {
+      stopReconnectLoop();
+      return;
+    }
+    if (newState.status !== VoiceConnectionStatus.Disconnected) return;
+    if (connection.state.status === VoiceConnectionStatus.Destroyed) return;
+    const movedOrKicked =
+      newState.reason === VoiceConnectionDisconnectReason.WebSocketClose && newState.closeCode === 4014;
+    if (movedOrKicked) {
+      try {
+        await entersState(connection, VoiceConnectionStatus.Signalling, 5000);
+        return;
+      } catch {
+      }
+    }
+    if (!reconnectTimer) reconnectTimer = setInterval(() => tryReconnect(), VOICE_RECONNECT_INTERVAL_MS);
+    await tryReconnect();
   });
 }
 

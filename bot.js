@@ -57,6 +57,9 @@ const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
 const TALK_CODING_STT_PROVIDER = String(process.env.TALK_CODING_STT_PROVIDER || "puter").toLowerCase();
 const LOCAL_WHISPER_PYTHON = process.env.LOCAL_WHISPER_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const LOCAL_WHISPER_TIMEOUT_MS = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 120000);
+const TALK_CODING_TTS_PROVIDER = String(process.env.TALK_CODING_TTS_PROVIDER || "qwen").toLowerCase();
+const QWEN_TTS_PYTHON = process.env.QWEN_TTS_PYTHON || LOCAL_WHISPER_PYTHON;
+const QWEN_TTS_TIMEOUT_MS = Number(process.env.QWEN_TTS_TIMEOUT_MS || 120000);
 const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
@@ -904,6 +907,37 @@ async function generateReply(session, userText) {
 }
 
 async function synthesizeTts(text) {
+  if (TALK_CODING_TTS_PROVIDER === "qwen" || TALK_CODING_TTS_PROVIDER === "dashscope") {
+    return synthesizeQwenTts(text);
+  }
+  return synthesizePuterTts(text);
+}
+
+function synthesizeQwenTts(text) {
+  const file = path.join(os.tmpdir(), `discoder-qwen-tts-${Date.now()}.mp3`);
+  const result = childProcess.spawnSync(
+    QWEN_TTS_PYTHON,
+    [path.join(__dirname, "qwen3_tts_flash.py"), "--stdin", "-o", file],
+    {
+      input: text.slice(0, 2800),
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: QWEN_TTS_TIMEOUT_MS,
+      env: process.env,
+    }
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `Qwen TTS failed with exit ${result.status}`).toString().trim());
+  }
+  try {
+    return fs.readFileSync(file);
+  } finally {
+    fs.rm(file, { force: true }, () => {});
+  }
+}
+
+async function synthesizePuterTts(text) {
   const puter = await getPuter();
   const audio = await puter.ai.txt2speech(text.slice(0, 2800), {
     provider: PUTER_TTS_PROVIDER,

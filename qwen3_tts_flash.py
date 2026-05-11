@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import dashscope
@@ -43,11 +44,16 @@ def synthesize_to_mp3(text: str, output_path: str | Path) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Synthesize MP3 audio with Alibaba Cloud Qwen3-TTS-Flash.")
-    parser.add_argument("text", help="Text to synthesize.")
+    parser.add_argument("text", nargs="?", help="Text to synthesize.")
+    parser.add_argument("--stdin", action="store_true", help="Read text from standard input.")
     parser.add_argument("-o", "--output", default="qwen3_tts_output.mp3", help="Output MP3 path.")
     args = parser.parse_args()
 
-    output = synthesize_to_mp3(args.text, args.output)
+    text = sys.stdin.read() if args.stdin else args.text
+    if text is None:
+        parser.error("text is required unless --stdin is used.")
+
+    output = synthesize_to_mp3(text, args.output)
     print(f"Saved MP3: {output}")
 
 

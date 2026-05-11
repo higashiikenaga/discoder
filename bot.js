@@ -50,6 +50,10 @@ const PUTER_AUTH_TOKEN = process.env.PUTER_AUTH_TOKEN;
 const PUTER_CHAT_MODEL = process.env.PUTER_CHAT_MODEL || "gemini-3-flash-preview";
 const DEFAULT_CODE_MODEL = process.env.PUTER_CODE_MODEL || PUTER_CHAT_MODEL;
 const PUTER_STT_MODEL = process.env.PUTER_STT_MODEL || "gpt-4o-mini-transcribe";
+const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
+  .split(",")
+  .map((model) => model.trim())
+  .filter(Boolean);
 const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
@@ -784,16 +788,24 @@ function pcmRms16le(buffer) {
 async function transcribePcm(pcm) {
   const puter = await getPuter();
   const dataUrl = pcmStereoToWavDataUrl(pcm);
-  const result = await puter.ai.speech2txt({
-    file: dataUrl,
-    model: PUTER_STT_MODEL,
-    response_format: "text",
-    language: STT_LANGUAGE,
-    audio_format: "wav",
-    sample_rate: 16000,
-    prompt: "Japanese Discord voice chat. The wake phrase may be コーダーたん.",
-  });
-  return { text: extractText(result).trim(), raw: result };
+  const models = PUTER_STT_MODELS.length ? PUTER_STT_MODELS : [PUTER_STT_MODEL];
+  let lastResult = null;
+  for (const model of models) {
+    const result = await puter.ai.speech2txt({
+      file: dataUrl,
+      model,
+      response_format: "text",
+      language: STT_LANGUAGE,
+      audio_format: "wav",
+      sample_rate: 16000,
+      prompt: "Japanese Discord voice chat. The wake phrase may be コーダーたん.",
+    });
+    lastResult = result;
+    if (result?.error || result?.code === "internal_error") continue;
+    const text = extractText(result).trim();
+    if (text) return { text, raw: result, model };
+  }
+  return { text: "", raw: lastResult, model: models[models.length - 1] };
 }
 
 function summarizeValue(value, depth = 0) {
@@ -1167,7 +1179,10 @@ async function handleVoiceChunk(session, userId, pcm) {
   const transcript = await transcribePcm(pcm);
   const text = transcript.text;
   if (!text) {
-    if (DEBUG_STT) await session.textChannel.send(`[STT] transcript empty raw=${summarizeValue(transcript.raw)}`.slice(0, 1900));
+    if (DEBUG_STT) {
+      await session.textChannel
+        .send(`[STT] transcript empty model=${transcript.model || "unknown"} raw=${summarizeValue(transcript.raw)}`.slice(0, 1900));
+    }
     return;
   }
   const member = await session.textChannel.guild.members.fetch(userId).catch(() => null);

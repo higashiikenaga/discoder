@@ -1,0 +1,23 @@
+{
+  "name": "discoder-voice-bridge",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js",
+    "voice-bridge": "node voice_bridge_node.js"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "@google-cloud/speech": "^7.0.1",
+    "@heyputer/puter.js": "^2.0.0",
+    "@noble/ciphers": "^1.3.0",
+    "libsodium-wrappers": "^0.7.15",
+    "opusscript": "0.0.8",
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "jszip": "^3.10.1",
+    "playwright": "^1.48.0",
+    "prism-media": "^1.3.5"
+  }
+}

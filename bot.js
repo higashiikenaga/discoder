@@ -54,6 +54,8 @@ const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
   .split(",")
   .map((model) => model.trim())
   .filter(Boolean);
+const TALK_CODING_STT_PROVIDER = String(process.env.TALK_CODING_STT_PROVIDER || "puter").toLowerCase();
+const LOCAL_WHISPER_PYTHON = process.env.LOCAL_WHISPER_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
@@ -736,7 +738,7 @@ async function uploadAttachmentsToDrive(userId, attachments) {
   return links;
 }
 
-function pcmStereoToWavDataUrl(pcm) {
+function pcmStereoToWavBuffer(pcm) {
   const result = childProcess.spawnSync(
     "ffmpeg",
     [
@@ -762,7 +764,11 @@ function pcmStereoToWavDataUrl(pcm) {
     { input: pcm, maxBuffer: 32 * 1024 * 1024 }
   );
   if (result.status !== 0) throw new Error(result.stderr.toString("utf8"));
-  return `data:audio/wav;base64,${result.stdout.toString("base64")}`;
+  return result.stdout;
+}
+
+function pcmStereoToWavDataUrl(pcm) {
+  return `data:audio/wav;base64,${pcmStereoToWavBuffer(pcm).toString("base64")}`;
 }
 
 function saveDebugWav(userId, pcm) {
@@ -787,6 +793,36 @@ function pcmRms16le(buffer) {
 }
 
 async function transcribePcm(pcm) {
+  if (TALK_CODING_STT_PROVIDER === "local_whisper" || TALK_CODING_STT_PROVIDER === "whisper") {
+    return transcribePcmWithLocalWhisper(pcm);
+  }
+  return transcribePcmWithPuter(pcm);
+}
+
+function transcribePcmWithLocalWhisper(pcm) {
+  const wav = pcmStereoToWavBuffer(pcm);
+  const result = childProcess.spawnSync(LOCAL_WHISPER_PYTHON, [path.join(__dirname, "local_whisper_stt.py")], {
+    input: wav,
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+    env: {
+      ...process.env,
+      TALK_CODING_STT_LANGUAGE_CODE: STT_LANGUAGE,
+    },
+  });
+  const stdout = String(result.stdout || "").trim();
+  let raw;
+  try {
+    raw = stdout ? JSON.parse(stdout) : {};
+  } catch {
+    raw = { error: "invalid_json", stdout };
+  }
+  if (result.error) raw = { ...raw, error: "spawn_failed", message: result.error.message };
+  if (result.status && !raw.error) raw = { ...raw, error: "process_failed", status: result.status, stderr: result.stderr };
+  return { text: extractText(raw).trim(), raw, model: raw.model || "local_whisper" };
+}
+
+async function transcribePcmWithPuter(pcm) {
   const puter = await getPuter();
   const dataUrl = pcmStereoToWavDataUrl(pcm);
   const models = PUTER_STT_MODELS.length ? PUTER_STT_MODELS : [PUTER_STT_MODEL];

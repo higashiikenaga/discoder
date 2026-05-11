@@ -791,19 +791,24 @@ async function transcribePcm(pcm) {
   const models = PUTER_STT_MODELS.length ? PUTER_STT_MODELS : [PUTER_STT_MODEL];
   let lastResult = null;
   for (const model of models) {
-    const result = await puter.ai.speech2txt({
-      file: dataUrl,
-      model,
-      response_format: "text",
-      language: STT_LANGUAGE,
-      audio_format: "wav",
-      sample_rate: 16000,
-      prompt: "Japanese Discord voice chat. The wake phrase may be コーダーたん.",
-    });
-    lastResult = result;
-    if (result?.error || result?.code === "internal_error") continue;
-    const text = extractText(result).trim();
-    if (text) return { text, raw: result, model };
+    try {
+      const result = await puter.ai.speech2txt(dataUrl, {
+        model,
+        response_format: "json",
+        language: STT_LANGUAGE,
+        prompt: "Japanese Discord voice chat. The wake phrase may be コーダーたん.",
+      });
+      lastResult = result;
+      if (result?.error || result?.code === "internal_error") continue;
+      const text = extractText(result).trim();
+      if (text) return { text, raw: result, model };
+    } catch (error) {
+      lastResult = {
+        error: error?.error || error?.message || String(error),
+        code: error?.code,
+        model,
+      };
+    }
   }
   return { text: "", raw: lastResult, model: models[models.length - 1] };
 }

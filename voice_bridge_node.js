@@ -10,8 +10,12 @@ const {
   StreamType,
   createAudioPlayer,
   createAudioResource,
+  entersState,
+  generateDependencyReport,
   getVoiceConnection,
   joinVoiceChannel,
+  VoiceConnectionDisconnectReason,
+  VoiceConnectionStatus,
 } = require("@discordjs/voice");
 const prism = require("prism-media");
 const speech = require("@google-cloud/speech");
@@ -22,6 +26,12 @@ const channelId = process.env.VOICE_BRIDGE_CHANNEL_ID;
 const languageCode = process.env.VOICE_BRIDGE_STT_LANGUAGE || "ja-JP";
 const sttModel = process.env.TALK_CODING_STT_MODEL || "";
 const saveDebugAudio = ["1", "true", "yes", "on"].includes((process.env.TALK_CODING_SAVE_STT_AUDIO || "false").toLowerCase());
+const receiveUserIds = new Set(
+  String(process.env.VOICE_BRIDGE_RECEIVE_USER_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+);
 
 function emit(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -39,6 +49,70 @@ const speechClient = new speech.SpeechClient();
 let connection = null;
 let player = createAudioPlayer();
 const subscriptions = new Map();
+
+emit({ type: "debug", message: generateDependencyReport() });
+
+function hasModule(name) {
+  try {
+    require.resolve(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function checkVoiceReceiveRuntime() {
+  const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+  if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
+    emit({ type: "debug", message: "@discordjs/voice latest requires Node 22.12.0 or newer for supported DAVE voice receive." });
+  }
+  if (!hasModule("@snazzah/davey")) {
+    emit({ type: "debug", message: "@snazzah/davey is missing; DAVE encrypted voice cannot be received." });
+  }
+  if (!hasModule("sodium-native") && !hasModule("libsodium-wrappers")) {
+    emit({ type: "debug", message: "No sodium encryption library found; install sodium-native for voice receive." });
+  }
+}
+
+function shouldReceiveUser(userId) {
+  return receiveUserIds.size === 0 || receiveUserIds.has(userId);
+}
+
+function createPcmReceiveStream(userId, endBehavior = { behavior: EndBehaviorType.AfterSilence, duration: 1800 }) {
+  const opus = connection.receiver.subscribe(userId, { end: endBehavior });
+  const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+  const pcm = opus.pipe(decoder);
+  return { opus, decoder, pcm };
+}
+
+function attachVoiceConnectionKeepAlive(guildId) {
+  let reconnecting = false;
+  connection.on("stateChange", async (oldState, newState) => {
+    emit({ type: "debug", message: `voice state ${oldState.status} -> ${newState.status}` });
+    if (newState.status !== VoiceConnectionStatus.Disconnected || reconnecting) return;
+    if (connection.state.status === VoiceConnectionStatus.Destroyed) return;
+    reconnecting = true;
+    try {
+      const movedOrKicked =
+        newState.reason === VoiceConnectionDisconnectReason.WebSocketClose && newState.closeCode === 4014;
+      if (movedOrKicked) {
+        try {
+          await entersState(connection, VoiceConnectionStatus.Signalling, 5000);
+        } catch {
+          connection.rejoin();
+        }
+      } else {
+        connection.rejoin();
+      }
+      await entersState(connection, VoiceConnectionStatus.Ready, 30000);
+      emit({ type: "debug", message: `voice reconnected guild=${guildId}` });
+    } catch (error) {
+      emit({ type: "error", message: `voice reconnect failed: ${error.message}` });
+    } finally {
+      reconnecting = false;
+    }
+  });
+}
 
 async function transcribePcm(userId, pcm) {
   if (!pcm || pcm.length < 48000) {
@@ -143,13 +217,11 @@ function pcmRms16le(buffer) {
 
 function subscribeUser(userId) {
   if (!connection) return;
+  if (!shouldReceiveUser(userId)) return;
   if (subscriptions.has(userId)) return;
-  const opus = connection.receiver.subscribe(userId, {
-    end: { behavior: EndBehaviorType.AfterSilence, duration: 1800 },
-  });
+  const { opus, decoder } = createPcmReceiveStream(userId);
   subscriptions.set(userId, opus);
   emit({ type: "debug", message: `subscribed ${userId}` });
-  const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
   const chunks = [];
   let bytes = 0;
   decoder.on("data", (chunk) => {
@@ -178,16 +250,24 @@ async function subscribeCurrentMembers(guild, channel) {
 }
 
 client.once("clientReady", async () => {
+  checkVoiceReceiveRuntime();
   const guild = await client.guilds.fetch(guildId);
   const channel = await guild.channels.fetch(channelId);
   connection = joinVoiceChannel({
     channelId,
     guildId,
-    adapterCreator: guild.voiceAdapterCreator,
+    adapterCreator: channel.guild.voiceAdapterCreator,
+    group: guildId,
+    daveEncryption: true,
+    decryptionFailureTolerance: 24,
+    debug: true,
     selfDeaf: false,
     selfMute: false,
   });
+  connection.on("debug", (message) => emit({ type: "debug", message: `[voice] ${message}` }));
+  attachVoiceConnectionKeepAlive(guildId);
   connection.subscribe(player);
+  await entersState(connection, VoiceConnectionStatus.Ready, 60000);
   await subscribeCurrentMembers(guild, channel);
   setInterval(() => subscribeCurrentMembers(guild, channel).catch((error) => emit({ type: "debug", message: `subscribe scan failed: ${error.message}` })), 3000);
   connection.receiver.speaking.on("start", (userId) => {
@@ -206,7 +286,7 @@ rl.on("line", (line) => {
     return;
   }
   if (payload.type === "stop") {
-    const current = getVoiceConnection(guildId);
+    const current = getVoiceConnection(guildId, guildId) || getVoiceConnection(guildId);
     if (current) current.destroy();
     client.destroy();
     process.exit(0);

@@ -58,6 +58,12 @@ const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
 const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 800);
+const VOICE_RECEIVE_USER_IDS = new Set(
+  String(process.env.TALK_CODING_RECEIVE_USER_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean)
+);
 const DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 const NODE_DRIVE_TOKEN_PATH = path.join(__dirname, "node_google_tokens.json");
 const NODE_PUTER_TOKEN_PATH = path.join(__dirname, "node_puter_token.json");
@@ -113,15 +119,20 @@ function hasModule(name) {
 function checkVoiceReceiveRuntime() {
   console.log(generateDependencyReport());
   const encryptionOk = hasModule("libsodium-wrappers") || hasModule("sodium-native");
+  const daveOk = hasModule("@snazzah/davey");
   const opusOk = hasModule("@discordjs/opus") || hasModule("node-opus") || hasModule("opusscript");
   if (!encryptionOk) {
-    console.warn("[voice] libsodium-wrappers is not installed. VC receive may connect but return 0-byte audio.");
+    console.warn("[voice] No sodium encryption library is installed. VC receive may connect but return 0-byte audio.");
+  }
+  if (!daveOk) {
+    console.warn("[voice] @snazzah/davey is not installed. DAVE encrypted voice channels cannot be received.");
   }
   if (!opusOk) {
     console.warn("[voice] No Opus decoder is installed. Install opusscript or @discordjs/opus.");
   }
-  if (Number(process.versions.node.split(".")[0]) >= 22) {
-    console.warn("[voice] Node 22 can be unstable for Discord voice receive. Node 20 LTS is recommended if audio bytes stay 0.");
+  const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+  if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
+    console.warn("[voice] @discordjs/voice latest requires Node 22.12.0 or newer for supported DAVE voice receive.");
   }
 }
 
@@ -839,6 +850,48 @@ async function waitForVoiceReady(connection, guildId) {
   throw new Error(`Voice connection did not become ready. Last state: ${connection.state.status}`);
 }
 
+function attachVoiceConnectionKeepAlive(connection, guildId) {
+  let reconnecting = false;
+  connection.on("stateChange", async (_oldState, newState) => {
+    if (newState.status !== VoiceConnectionStatus.Disconnected || reconnecting) return;
+    if (connection.state.status === VoiceConnectionStatus.Destroyed) return;
+    reconnecting = true;
+    try {
+      const movedOrKicked =
+        newState.reason === VoiceConnectionDisconnectReason.WebSocketClose && newState.closeCode === 4014;
+      if (movedOrKicked) {
+        try {
+          await entersState(connection, VoiceConnectionStatus.Signalling, 5000);
+        } catch {
+          connection.rejoin();
+        }
+      } else {
+        connection.rejoin();
+      }
+      await entersState(connection, VoiceConnectionStatus.Ready, 30000);
+      console.log(`[voice] reconnected guild=${guildId}`);
+    } catch (error) {
+      console.error(`[voice] reconnect failed guild=${guildId}:`, error?.stack || error);
+    } finally {
+      reconnecting = false;
+    }
+  });
+}
+
+function shouldReceiveUser(session, userId) {
+  if (VOICE_RECEIVE_USER_IDS.size === 0) return true;
+  if (VOICE_RECEIVE_USER_IDS.has(userId)) return true;
+  if (DEBUG_STT) session.textChannel.send(`[STT] ignored ${userId}; not in TALK_CODING_RECEIVE_USER_IDS`).catch(() => {});
+  return false;
+}
+
+function createPcmReceiveStream(connection, userId, endBehavior = { behavior: EndBehaviorType.Manual }) {
+  const opus = connection.receiver.subscribe(userId, { end: endBehavior });
+  const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+  const pcm = opus.pipe(decoder);
+  return { opus, decoder, pcm };
+}
+
 async function startTalkSession(message, voiceChannel) {
   const existing = sessions.get(message.guild.id);
   if (existing) {
@@ -862,8 +915,11 @@ async function startTalkSession(message, voiceChannel) {
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
     guildId: message.guild.id,
-    adapterCreator: message.guild.voiceAdapterCreator,
+    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     group: message.guild.id,
+    daveEncryption: true,
+    decryptionFailureTolerance: 24,
+    debug: DEBUG_STT,
     selfDeaf: false,
     selfMute: false,
   });
@@ -878,6 +934,7 @@ async function startTalkSession(message, voiceChannel) {
       );
     }
   });
+  attachVoiceConnectionKeepAlive(connection, message.guild.id);
   connection.subscribe(player);
   try {
     await waitForVoiceReady(connection, message.guild.id);
@@ -978,14 +1035,12 @@ function subscribeMembers(session) {
 
 function subscribeUser(session, userId, reason = "speaking start") {
   if (!opusReceiveAvailable) return;
+  if (!shouldReceiveUser(session, userId)) return;
   if (session.subscriptions.has(userId)) return;
   let opus;
   let decoder;
   try {
-    opus = session.connection.receiver.subscribe(userId, {
-      end: { behavior: EndBehaviorType.Manual },
-    });
-    decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+    ({ opus, decoder } = createPcmReceiveStream(session.connection, userId));
   } catch (error) {
     opusReceiveAvailable = false;
     console.error("[STT] Opus decoder is not available:", error?.message || error);
@@ -1028,7 +1083,6 @@ function subscribeUser(session, userId, reason = "speaking start") {
     if (DEBUG_STT) session.textChannel.send(`[STT] opus error ${userId}: ${error.message}`).catch(() => {});
     session.subscriptions.delete(userId);
   });
-  opus.pipe(decoder);
 }
 
 function finishVoiceSubscription(session, userId, reason) {

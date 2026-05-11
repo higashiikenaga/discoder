@@ -27,6 +27,17 @@ python bot.py
 
 ## Node.js Version
 
+For DAVE/E2EE Discord voice receive, use Node.js 22.12.0 or newer. The current
+Node bot depends on `@discordjs/voice` 0.19.x, `@snazzah/davey`, and
+`sodium-native`.
+
+Oracle Always Free deployment notes:
+
+- Install Node.js 22 LTS or newer before running `npm install`.
+- Keep secrets in `.env`; do not commit `.env`, token JSON files, databases, or SSH keys.
+- Open outbound UDP for Discord voice. If you also expose Google OAuth, allow the configured `GOOGLE_OAUTH_PORT`.
+- Run the bot with a process manager such as `systemd` or `pm2` after confirming `npm start` works.
+
 Node版は `bot.js` を使います。Puter.jsでコード生成/STT/TTSを行い、完成時にzip、プレビュー画像、Google Drive保存まで実行します。
 
 ```powershell

@@ -610,7 +610,7 @@ function startDriveOAuthServer() {
   driveOAuthServerStarted = true;
   const url = new URL(googleRedirectUri());
   const port = Number(process.env.GOOGLE_OAUTH_PORT || url.port || 8080);
-  const host = process.env.GOOGLE_OAUTH_HOST || "0.0.0.0";
+  const host = process.env.GOOGLE_OAUTH_HOST || "::";
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);
     if (requestUrl.pathname !== "/oauth2callback") {

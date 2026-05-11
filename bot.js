@@ -63,6 +63,7 @@ const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
 const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 800);
 const STT_SCAN_SUBSCRIBE = isTruthy(process.env.TALK_CODING_STT_SCAN_SUBSCRIBE);
+const VOICE_DECRYPTION_FAILURE_TOLERANCE = Number(process.env.DISCORD_VOICE_DECRYPTION_FAILURE_TOLERANCE || 250);
 const VOICE_RECEIVE_USER_IDS = new Set(
   String(process.env.TALK_CODING_RECEIVE_USER_IDS || "")
     .split(",")
@@ -974,7 +975,7 @@ async function startTalkSession(message, voiceChannel) {
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
     group: message.guild.id,
     daveEncryption: true,
-    decryptionFailureTolerance: 24,
+    decryptionFailureTolerance: VOICE_DECRYPTION_FAILURE_TOLERANCE,
     debug: DEBUG_STT,
     selfDeaf: false,
     selfMute: false,

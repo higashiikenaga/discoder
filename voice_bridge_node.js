@@ -26,6 +26,7 @@ const channelId = process.env.VOICE_BRIDGE_CHANNEL_ID;
 const languageCode = process.env.VOICE_BRIDGE_STT_LANGUAGE || "ja-JP";
 const sttModel = process.env.TALK_CODING_STT_MODEL || "";
 const saveDebugAudio = ["1", "true", "yes", "on"].includes((process.env.TALK_CODING_SAVE_STT_AUDIO || "false").toLowerCase());
+const decryptionFailureTolerance = Number(process.env.DISCORD_VOICE_DECRYPTION_FAILURE_TOLERANCE || 250);
 const receiveUserIds = new Set(
   String(process.env.VOICE_BRIDGE_RECEIVE_USER_IDS || "")
     .split(",")
@@ -259,7 +260,7 @@ client.once("clientReady", async () => {
     adapterCreator: channel.guild.voiceAdapterCreator,
     group: guildId,
     daveEncryption: true,
-    decryptionFailureTolerance: 24,
+    decryptionFailureTolerance,
     debug: true,
     selfDeaf: false,
     selfMute: false,

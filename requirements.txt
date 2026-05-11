@@ -9,3 +9,4 @@ discord-ext-voice-recv[extras_speech]
 dashscope>=1.24.6
 google-cloud-speech>=2.35.0
 faster-whisper>=1.1.0
+requests>=2.32.0

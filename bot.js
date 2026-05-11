@@ -60,6 +60,7 @@ const LOCAL_WHISPER_TIMEOUT_MS = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 
 const TALK_CODING_TTS_PROVIDER = String(process.env.TALK_CODING_TTS_PROVIDER || "qwen").toLowerCase();
 const QWEN_TTS_PYTHON = process.env.QWEN_TTS_PYTHON || LOCAL_WHISPER_PYTHON;
 const QWEN_TTS_TIMEOUT_MS = Number(process.env.QWEN_TTS_TIMEOUT_MS || 120000);
+const TTS_MAX_CHARS = Number(process.env.TALK_CODING_TTS_MAX_CHARS || 220);
 const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
@@ -908,9 +909,20 @@ async function generateReply(session, userText) {
 
 async function synthesizeTts(text) {
   if (TALK_CODING_TTS_PROVIDER === "qwen" || TALK_CODING_TTS_PROVIDER === "dashscope") {
-    return synthesizeQwenTts(text);
+    return synthesizeQwenTts(toSpeechText(text));
   }
-  return synthesizePuterTts(text);
+  return synthesizePuterTts(toSpeechText(text));
+}
+
+function toSpeechText(text) {
+  const withoutCode = String(text || "")
+    .replace(/```[\s\S]*?```/g, "コード部分はチャットに書いたよ。")
+    .replace(/<[^>\n]{1,80}>/g, "")
+    .replace(/[{}[\]();<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (withoutCode.length <= TTS_MAX_CHARS) return withoutCode;
+  return `${withoutCode.slice(0, TTS_MAX_CHARS)}。続きはチャットを見てね。`;
 }
 
 function synthesizeQwenTts(text) {
@@ -1326,10 +1338,12 @@ async function handleVoiceChunk(session, userId, pcm) {
 async function handleTalkText(session, member, rawText, fromVoice = false) {
   let text = rawText.trim();
   if (fromVoice) {
-    if (hasWakeWord(text) || hasRecognizedWakeWord(text)) {
+    const hasWake = hasWakeWord(text) || hasRecognizedWakeWord(text);
+    if (hasWake) {
       session.armedUntil = Date.now() + 15000;
       text = stripRecognizedWakeWord(stripWakeWord(text));
-      if (!text) {
+      const onlyWakeWord = !text || text.length <= 3 || /^(はい|うん|えっと|あの|ねえ|ねぇ|お願い|おねがい)$/i.test(text);
+      if (onlyWakeWord) {
         await session.textChannel.send(`${member} 呼んだ？続けて話してね。`);
         return;
       }

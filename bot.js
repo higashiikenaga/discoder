@@ -56,6 +56,7 @@ const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
   .filter(Boolean);
 const TALK_CODING_STT_PROVIDER = String(process.env.TALK_CODING_STT_PROVIDER || "puter").toLowerCase();
 const LOCAL_WHISPER_PYTHON = process.env.LOCAL_WHISPER_PYTHON || (process.platform === "win32" ? "python" : "python3");
+const LOCAL_WHISPER_TIMEOUT_MS = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 120000);
 const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
@@ -802,11 +803,13 @@ async function transcribePcm(pcm) {
 }
 
 function transcribePcmWithLocalWhisper(pcm) {
+  const started = Date.now();
   const wav = pcmStereoToWavBuffer(pcm);
   const result = childProcess.spawnSync(LOCAL_WHISPER_PYTHON, [path.join(__dirname, "local_whisper_stt.py")], {
     input: wav,
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    timeout: LOCAL_WHISPER_TIMEOUT_MS,
     env: {
       ...process.env,
       TALK_CODING_STT_LANGUAGE_CODE: STT_LANGUAGE,
@@ -821,6 +824,7 @@ function transcribePcmWithLocalWhisper(pcm) {
   }
   if (result.error) raw = { ...raw, error: "spawn_failed", message: result.error.message };
   if (result.status && !raw.error) raw = { ...raw, error: "process_failed", status: result.status, stderr: result.stderr };
+  raw.elapsed_ms = Date.now() - started;
   return { text: extractText(raw).trim(), raw, model: raw.model || "local_whisper" };
 }
 
@@ -1240,9 +1244,18 @@ async function handleVoiceChunk(session, userId, pcm) {
     await session.textChannel.send(`[STT] saved debug wav: ${file}`);
   }
 
-  if (DEBUG_STT) await session.textChannel.send("[STT] sending audio to Puter STT...");
+  if (DEBUG_STT) await session.textChannel.send(`[STT] sending audio to ${TALK_CODING_STT_PROVIDER} STT...`);
+  const sttStarted = Date.now();
   const transcript = await transcribePcm(pcm);
   const text = transcript.text;
+  if (DEBUG_STT) {
+    await session.textChannel
+      .send(
+        `[STT] ${TALK_CODING_STT_PROVIDER} result model=${transcript.model || "unknown"} elapsed=${Date.now() - sttStarted}ms text=${text || "(empty)"}`
+          .slice(0, 1900)
+      )
+      .catch(() => {});
+  }
   if (!text) {
     if (DEBUG_STT) {
       await session.textChannel

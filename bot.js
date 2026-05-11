@@ -58,6 +58,7 @@ const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
 const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 800);
+const STT_SCAN_SUBSCRIBE = isTruthy(process.env.TALK_CODING_STT_SCAN_SUBSCRIBE);
 const VOICE_RECEIVE_USER_IDS = new Set(
   String(process.env.TALK_CODING_RECEIVE_USER_IDS || "")
     .split(",")
@@ -198,10 +199,34 @@ function savePuterToken(authToken) {
 function extractText(response) {
   if (response == null) return "";
   if (typeof response === "string") return response;
-  if (response.text) return String(response.text);
-  if (response.message?.content) return response.message.content.toString();
-  if (response.content) return response.content.toString();
-  return String(response);
+  if (typeof response === "number" || typeof response === "boolean") return String(response);
+  if (Buffer.isBuffer(response)) return response.toString("utf8");
+  if (Array.isArray(response)) return response.map(extractText).filter(Boolean).join("\n");
+  if (typeof response !== "object") return String(response);
+
+  const candidates = [
+    response.text,
+    response.transcript,
+    response.transcription,
+    response.output_text,
+    response.output,
+    response.result,
+    response.data,
+    response.value,
+    response.message?.content,
+    response.content,
+    response.choices?.[0]?.message?.content,
+    response.choices?.[0]?.text,
+    response.alternatives?.[0]?.transcript,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null || candidate === response) continue;
+    const text = extractText(candidate).trim();
+    if (text) return text;
+  }
+
+  const stringified = String(response);
+  return stringified === "[object Object]" ? "" : stringified;
 }
 
 function safeName(value) {
@@ -959,8 +984,10 @@ async function startTalkSession(message, voiceChannel) {
     busy: false,
   };
   sessions.set(message.guild.id, session);
-  subscribeMembers(session);
-  session.scanTimer = setInterval(() => subscribeMembers(session), 2000);
+  if (STT_SCAN_SUBSCRIBE) {
+    subscribeMembers(session);
+    session.scanTimer = setInterval(() => subscribeMembers(session), 2000);
+  }
   connection.receiver.speaking.on("start", (userId) => subscribeUser(session, userId));
   connection.receiver.speaking.on("end", (userId) => finishVoiceSubscription(session, userId, "speaking end"));
   connection.receiver.speaking.on("start", (userId) => {

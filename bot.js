@@ -731,7 +731,7 @@ async function uploadAttachmentsToDrive(userId, attachments) {
   return links;
 }
 
-function pcmStereoToFlacDataUrl(pcm) {
+function pcmStereoToWavDataUrl(pcm) {
   const result = childProcess.spawnSync(
     "ffmpeg",
     [
@@ -751,13 +751,13 @@ function pcmStereoToFlacDataUrl(pcm) {
       "-ac",
       "1",
       "-f",
-      "flac",
+      "wav",
       "pipe:1",
     ],
     { input: pcm, maxBuffer: 32 * 1024 * 1024 }
   );
   if (result.status !== 0) throw new Error(result.stderr.toString("utf8"));
-  return `data:audio/flac;base64,${result.stdout.toString("base64")}`;
+  return `data:audio/wav;base64,${result.stdout.toString("base64")}`;
 }
 
 function saveDebugWav(userId, pcm) {
@@ -783,15 +783,29 @@ function pcmRms16le(buffer) {
 
 async function transcribePcm(pcm) {
   const puter = await getPuter();
-  const dataUrl = pcmStereoToFlacDataUrl(pcm);
+  const dataUrl = pcmStereoToWavDataUrl(pcm);
   const result = await puter.ai.speech2txt({
-    audio: dataUrl,
+    file: dataUrl,
     model: PUTER_STT_MODEL,
     response_format: "text",
     language: STT_LANGUAGE,
+    audio_format: "wav",
+    sample_rate: 16000,
     prompt: "Japanese Discord voice chat. The wake phrase may be コーダーたん.",
   });
-  return extractText(result).trim();
+  return { text: extractText(result).trim(), raw: result };
+}
+
+function summarizeValue(value, depth = 0) {
+  if (value == null) return String(value);
+  if (typeof value === "string") return value.slice(0, 300);
+  if (typeof value !== "object") return String(value);
+  if (depth >= 2) return Array.isArray(value) ? `[array:${value.length}]` : `[object:${Object.keys(value).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.slice(0, 3).map((item) => summarizeValue(item, depth + 1)).join(", ")}]`;
+  return `{${Object.entries(value)
+    .slice(0, 8)
+    .map(([key, item]) => `${key}:${summarizeValue(item, depth + 1)}`)
+    .join(", ")}}`;
 }
 
 async function generateReply(session, userText) {
@@ -1150,9 +1164,10 @@ async function handleVoiceChunk(session, userId, pcm) {
   }
 
   if (DEBUG_STT) await session.textChannel.send("[STT] sending audio to Puter STT...");
-  const text = await transcribePcm(pcm);
+  const transcript = await transcribePcm(pcm);
+  const text = transcript.text;
   if (!text) {
-    if (DEBUG_STT) await session.textChannel.send("[STT] transcript empty");
+    if (DEBUG_STT) await session.textChannel.send(`[STT] transcript empty raw=${summarizeValue(transcript.raw)}`.slice(0, 1900));
     return;
   }
   const member = await session.textChannel.guild.members.fetch(userId).catch(() => null);

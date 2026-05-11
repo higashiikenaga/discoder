@@ -108,6 +108,8 @@ const LANGUAGE_CHOICES = [
 ];
 let opusReceiveAvailable = true;
 const WAKE_PATTERNS = [
+  /(?:コー?ダー|こー?だー|こうだー?|こだー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i,
+  /(?:coder|koder|corder)\s*(?:tan|さん|たん|ちゃん)?/i,
   /(?:コー|こー|こう)\s*(?:ダー|だー|だ)\s*(?:たん|さん|ちゃん)?/i,
   /コード\s*(?:たん|さん|ちゃん)?/i,
   /こーど\s*(?:たん|さん|ちゃん)?/i,
@@ -603,6 +605,24 @@ function stripWakeWord(text) {
   let output = text.trim();
   for (const pattern of WAKE_PATTERNS) output = output.replace(pattern, "").trim();
   return output.replace(/^[、。!！?？:：\s-]+/, "").trim();
+}
+
+function normalizeRecognizedWakeText(text) {
+  return text
+    .normalize("NFKC")
+    .replace(/[　\s]+/g, "")
+    .toLowerCase();
+}
+
+function hasRecognizedWakeWord(text) {
+  const normalized = normalizeRecognizedWakeText(text);
+  return /(?:コーダー|こーだー|こうだー|こだー|こら|おら|おーら)(?:たん|さん|ちゃん)?/.test(normalized);
+}
+
+function stripRecognizedWakeWord(text) {
+  let output = text.trim();
+  output = output.replace(/(?:コー?\s*ダー|こー?\s*だー|こう\s*だー?|こ\s*だー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i, "");
+  return output.replace(/^[\s、。,.!！?？:：;；\-ー〜～]+/, "").trim();
 }
 
 function isLeaveRequest(text) {
@@ -1265,16 +1285,16 @@ async function handleVoiceChunk(session, userId, pcm) {
   }
   const member = await session.textChannel.guild.members.fetch(userId).catch(() => null);
   if (!member || member.voice.channelId !== session.voiceChannelId) return;
-  if (DEBUG_STT) await session.textChannel.send(`[STT] ${member.displayName}: ${text}`);
+  await session.textChannel.send(`[STT] ${member.displayName}: ${text}`).catch(() => {});
   await handleTalkText(session, member, text, true);
 }
 
 async function handleTalkText(session, member, rawText, fromVoice = false) {
   let text = rawText.trim();
   if (fromVoice) {
-    if (hasWakeWord(text)) {
+    if (hasWakeWord(text) || hasRecognizedWakeWord(text)) {
       session.armedUntil = Date.now() + 15000;
-      text = stripWakeWord(text);
+      text = stripRecognizedWakeWord(stripWakeWord(text));
       if (!text) {
         await session.textChannel.send(`${member} 呼んだ？続けて話してね。`);
         return;

@@ -921,8 +921,35 @@ function toSpeechText(text) {
     .replace(/[{}[\]();<>]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (withoutCode.length <= TTS_MAX_CHARS) return withoutCode;
-  return `${withoutCode.slice(0, TTS_MAX_CHARS)}。続きはチャットを見てね。`;
+  const readable = applyJapaneseTtsReadings(withoutCode);
+  if (readable.length <= TTS_MAX_CHARS) return readable;
+  return `${readable.slice(0, TTS_MAX_CHARS)}。続きはチャットを見てね。`;
+}
+
+function applyJapaneseTtsReadings(text) {
+  return String(text || "")
+    .replace(/了解/g, "りょうかい")
+    .replace(/動く/g, "うごく")
+    .replace(/動か/g, "うごか")
+    .replace(/動き/g, "うごき")
+    .replace(/実行/g, "じっこう")
+    .replace(/保存/g, "ほぞん")
+    .replace(/作成/g, "さくせい")
+    .replace(/生成/g, "せいせい")
+    .replace(/修正/g, "しゅうせい")
+    .replace(/確認/g, "かくにん")
+    .replace(/設定/g, "せってい")
+    .replace(/追加/g, "ついか")
+    .replace(/変更/g, "へんこう")
+    .replace(/完了/g, "かんりょう")
+    .replace(/起動/g, "きどう")
+    .replace(/接続/g, "せつぞく")
+    .replace(/音声/g, "おんせい")
+    .replace(/認識/g, "にんしき")
+    .replace(/読み上げ/g, "よみあげ")
+    .replace(/大丈夫/g, "だいじょうぶ")
+    .replace(/問題/g, "もんだい")
+    .replace(/基本/g, "きほん");
 }
 
 function synthesizeQwenTts(text) {

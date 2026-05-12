@@ -1624,8 +1624,17 @@ function isImageRequest(text) {
   return /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust|生成|描いて|作って)/i.test(text) && /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust)/i.test(text);
 }
 
+function hasImageAttachment(attachments = []) {
+  return attachments.some((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
+}
+
 function isImageToTextRequest(text, attachments = []) {
-  return attachments.length > 0 && /(?:画像.*(?:文字|テキスト|読|ocr)|(?:文字|テキスト).*(?:抽出|読|起こ)|img2txt|ocr|読み取|読んで)/i.test(text);
+  return (
+    hasImageAttachment(attachments) &&
+    /(?:画像.*(?:文字|テキスト|読|認識|解析|分析|説明|見|何|なに|内容|わか|分か|判定|ocr)|(?:文字|テキスト).*(?:抽出|読|起こ)|(?:この|添付).*(?:認識|解析|分析|説明|見|何|なに|内容|わか|分か|判定)|img2txt|ocr|読み取|読んで|認識できる|何が写|なにが写|見える|説明して)/i.test(
+      text
+    )
+  );
 }
 
 function isVideoRequest(text) {

@@ -795,6 +795,29 @@ function findVoiceChannel(message) {
   return message.member?.voice?.channel || null;
 }
 
+function isBotMentioned(message) {
+  const id = client.user?.id;
+  if (!id) return false;
+  if (message.mentions.users.has(id)) return true;
+  if (message.mentions.repliedUser?.id === id) return true;
+  if (message.content.includes(`<@${id}>`) || message.content.includes(`<@!${id}>`)) return true;
+  const username = client.user?.username;
+  return Boolean(username && new RegExp(`@?${escapeRegExp(username)}\\b`, "i").test(message.content));
+}
+
+function stripBotMention(text) {
+  const id = client.user?.id;
+  let output = String(text || "");
+  if (id) output = output.replace(new RegExp(`<@!?${escapeRegExp(id)}>`, "g"), "");
+  const username = client.user?.username;
+  if (username) output = output.replace(new RegExp(`@?${escapeRegExp(username)}\\b`, "ig"), "");
+  return output.trim();
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function googleOAuthConfigured() {
   return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
 }
@@ -2100,8 +2123,8 @@ client.on("interactionCreate", async (interaction) => {
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot || !message.guild) return;
-  const mentioned = message.mentions.users.has(client.user.id);
-  const content = message.content.replace(`<@${client.user.id}>`, "").replace(`<@!${client.user.id}>`, "").trim();
+  const mentioned = isBotMentioned(message);
+  const content = stripBotMention(message.content);
   const session = sessions.get(message.guild.id);
 
   if (mentioned && content && isVideoRequest(content)) {
@@ -2111,6 +2134,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
     if (session) session.busy = true;
+    await message.reply("動画生成リクエストを受け付けました。生成中...");
     try {
       await sendDirectVideoResult(message.channel, content);
       if (session) {

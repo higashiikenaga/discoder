@@ -49,7 +49,10 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const PUTER_AUTH_TOKEN = process.env.PUTER_AUTH_TOKEN;
 const PUTER_CHAT_MODEL = process.env.PUTER_CHAT_MODEL || "gemini-3-flash-preview";
 const DEFAULT_CODE_MODEL = process.env.PUTER_CODE_MODEL || PUTER_CHAT_MODEL;
-const PUTER_IMAGE_MODEL = process.env.PUTER_IMAGE_MODEL || "gemini-2.5-flash-image-preview";
+const PUTER_IMAGE_PROVIDER = process.env.PUTER_IMAGE_PROVIDER || "openai-image-generation";
+const PUTER_IMAGE_MODEL = process.env.PUTER_IMAGE_MODEL || "gpt-image-1-mini";
+const PUTER_IMAGE_QUALITY = process.env.PUTER_IMAGE_QUALITY || "low";
+const PUTER_IMAGE_TEST_MODE = isTruthy(process.env.PUTER_IMAGE_TEST_MODE);
 const PUTER_STT_MODEL = process.env.PUTER_STT_MODEL || "gpt-4o-mini-transcribe";
 const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
   .split(",")
@@ -385,8 +388,14 @@ async function imageSourceToAttachment(source, name = "generated-image.png") {
 
 async function generateImageAttachment(prompt) {
   const puter = await getPuter();
+  const options = {
+    provider: PUTER_IMAGE_PROVIDER,
+    model: PUTER_IMAGE_MODEL,
+    quality: PUTER_IMAGE_QUALITY,
+    test_mode: PUTER_IMAGE_TEST_MODE,
+  };
   const image = await withTimeout(
-    puter.ai.txt2img(prompt, { model: PUTER_IMAGE_MODEL, ratio: { w: 1024, h: 1024 } }),
+    puter.ai.txt2img(prompt, options),
     `puter.ai.txt2img ${PUTER_IMAGE_MODEL}`,
     PUTER_AI_TIMEOUT_MS
   );

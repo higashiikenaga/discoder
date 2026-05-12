@@ -1731,6 +1731,10 @@ async function sendTalkVideoResult(session, text) {
   }
 }
 
+async function sendDirectVideoResult(channel, text) {
+  await sendTalkVideoResult({ textChannel: channel }, text);
+}
+
 async function sendTalkImageTextResult(session, text, attachments) {
   const image = attachments.find((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
   if (!image) {
@@ -2099,6 +2103,29 @@ client.on("messageCreate", async (message) => {
   const mentioned = message.mentions.users.has(client.user.id);
   const content = message.content.replace(`<@${client.user.id}>`, "").replace(`<@!${client.user.id}>`, "").trim();
   const session = sessions.get(message.guild.id);
+
+  if (mentioned && content && isVideoRequest(content)) {
+    console.log(`[talk] direct txt2vid request guild=${message.guild.id} channel=${message.channel.id}: ${content}`);
+    if (session?.busy) {
+      await message.reply("前の依頼を処理中です。少し待ってね。");
+      return;
+    }
+    if (session) session.busy = true;
+    try {
+      await sendDirectVideoResult(message.channel, content);
+      if (session) {
+        session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
+        session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
+        session.history.splice(0, Math.max(0, session.history.length - 24));
+      }
+    } catch (error) {
+      console.error("[talk] direct txt2vid failed:", error?.stack || error);
+      await message.channel.send(`動画生成に失敗しました: \`${error.message || error}\``).catch(() => {});
+    } finally {
+      if (session) session.busy = false;
+    }
+    return;
+  }
 
   if (mentioned && isLeaveRequest(content)) {
     if (session && session.ownerId !== message.author.id) {

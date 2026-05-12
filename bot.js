@@ -1638,7 +1638,10 @@ function isImageToTextRequest(text, attachments = []) {
 }
 
 function isVideoRequest(text) {
-  return /(?:動画|ビデオ|映像|video|movie|txt2vid|生成|作って)/i.test(text) && /(?:動画|ビデオ|映像|video|movie|txt2vid)/i.test(text);
+  const normalized = String(text || "").normalize("NFKC").toLowerCase().replace(/\s+/g, "");
+  return /(?:動画|どうが|ドウガ|ビデオ|びでお|映像|えいぞう|ムービー|むーびー|video|movie|txt2vid)(?:を)?(?:生成|作成|作って|つくって|作れ|お願い|ください|して)?/.test(
+    normalized
+  );
 }
 
 function cleanupMediaPrompt(text, fallback) {
@@ -1659,7 +1662,9 @@ function extractImagePrompt(text) {
 }
 
 function extractVideoPrompt(text) {
-  return cleanupMediaPrompt(text, "動画");
+  return cleanupMediaPrompt(text, "動画")
+    .replace(/^(?:どうが|ドウガ|びでお|えいぞう|ムービー|むーびー)$/i, "動画")
+    .trim();
 }
 
 async function sendLoadingMessage(channel, initialText, intervalText) {

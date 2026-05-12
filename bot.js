@@ -423,6 +423,43 @@ async function mediaSourceToAttachment(source, name, fallbackMimeType = "applica
   throw new Error("generation returned unsupported media source");
 }
 
+function collectMediaSources(value, seen = new Set()) {
+  if (value == null) return [];
+  if (typeof value === "string") return [value];
+  if (typeof value !== "object" || seen.has(value)) return [];
+  seen.add(value);
+
+  const sources = [];
+  for (const key of ["src", "url", "href", "asset_url", "source", "data", "download_url", "video_url", "output", "result"]) {
+    if (value[key] != null) sources.push(...collectMediaSources(value[key], seen));
+  }
+  if (typeof value.getAttribute === "function") {
+    for (const attr of ["data-source", "src", "href"]) {
+      const attrValue = value.getAttribute(attr);
+      if (attrValue) sources.push(attrValue);
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) sources.push(...collectMediaSources(item, seen));
+  }
+  return sources;
+}
+
+async function mediaResultToAttachment(value, name, fallbackMimeType) {
+  const sources = collectMediaSources(value);
+  let lastError = null;
+  for (const source of sources) {
+    try {
+      return await mediaSourceToAttachment(source, name, fallbackMimeType);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const error = new Error(`generation returned unsupported media source: ${summarizeValue(value).slice(0, 500)}`);
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
 function replaceExtension(name, ext) {
   return String(name || "generated-media.bin").replace(/\.[A-Za-z0-9]+$/i, `.${ext}`);
 }
@@ -443,9 +480,8 @@ async function generateVideoAttachment(prompt) {
   const model = puterVideoModelForDate();
   const options = { model, seconds: model === "sora-2" ? 4 : 4, size: "1280x720" };
   const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
-  const source = video?.src || video?.getAttribute?.("data-source") || video?.url || String(video);
   return {
-    attachment: await mediaSourceToAttachment(source, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
+    attachment: await mediaResultToAttachment(video, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
     model,
   };
 }
@@ -1672,6 +1708,9 @@ async function sendTalkVideoResult(session, text) {
       content: `**動画生成**\nモデル: \`${result.model}\`\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],
     });
+  } catch (error) {
+    await loading.message.edit(`動画生成は完了しましたが、Discord添付に変換できませんでした: \`${error.message}\``.slice(0, 2000)).catch(() => {});
+    throw error;
   } finally {
     loading.stop();
   }

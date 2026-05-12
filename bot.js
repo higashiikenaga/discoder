@@ -68,8 +68,8 @@ const PUTER_AI_TIMEOUT_MS = Number(process.env.PUTER_AI_TIMEOUT_MS || 90000);
 const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
-const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 450);
-const STT_MAX_RECORDING_MS = Number(process.env.TALK_CODING_STT_MAX_RECORDING_MS || 3500);
+const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 3000);
+const STT_MAX_RECORDING_MS = Number(process.env.TALK_CODING_STT_MAX_RECORDING_MS || 30000);
 const STT_SCAN_SUBSCRIBE = isTruthy(process.env.TALK_CODING_STT_SCAN_SUBSCRIBE);
 const VOICE_DECRYPTION_FAILURE_TOLERANCE = Number(process.env.DISCORD_VOICE_DECRYPTION_FAILURE_TOLERANCE || 250);
 const VOICE_RECONNECT_INTERVAL_MS = Number(process.env.DISCORD_VOICE_RECONNECT_INTERVAL_MS || 5000);
@@ -1178,7 +1178,6 @@ async function startTalkSession(message, voiceChannel) {
     session.scanTimer = setInterval(() => subscribeMembers(session), 2000);
   }
   connection.receiver.speaking.on("start", (userId) => subscribeUser(session, userId));
-  connection.receiver.speaking.on("end", (userId) => finishVoiceSubscription(session, userId, "speaking end"));
   connection.receiver.speaking.on("start", (userId) => {
     if (DEBUG_STT) session.textChannel.send(`[STT] speaking start ${userId}`).catch(() => {});
   });
@@ -1341,7 +1340,7 @@ async function handleVoiceChunk(session, userId, pcm) {
   }
   if (SAVE_STT_AUDIO) {
     const file = saveDebugWav(userId, pcm);
-    await session.textChannel.send(`[STT] saved debug wav: ${file}`);
+    if (DEBUG_STT) console.log(`[STT] saved debug wav: ${file}`);
   }
 
   if (DEBUG_STT) await session.textChannel.send(`[STT] sending audio to ${TALK_CODING_STT_PROVIDER} STT...`);

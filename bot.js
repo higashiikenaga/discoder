@@ -478,8 +478,10 @@ function extensionForMimeType(mimeType, fallback = "bin") {
 async function generateVideoAttachment(prompt) {
   const puter = await getPuter();
   const model = puterVideoModelForDate();
-  const options = { model, seconds: model === "sora-2" ? 4 : 4, size: "1280x720" };
+  const options = { model };
+  console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
   const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
+  console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
   return {
     attachment: await mediaResultToAttachment(video, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
     model,
@@ -1735,13 +1737,16 @@ async function sendTalkImageResult(session, text) {
 async function sendTalkVideoResult(session, text) {
   const prompt = extractVideoPrompt(text) || text;
   const model = puterVideoModelForDate();
+  console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} model=${model}`);
   const loading = await sendLoadingMessage(
     session.textChannel,
     `動画を生成中... モデル: \`${model}\`\n\`${prompt.slice(0, 160)}\``,
     `動画を生成中... モデル: \`${model}\``
   );
   try {
+    await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n\`${prompt.slice(0, 160)}\``).catch(() => {});
     const result = await generateVideoAttachment(prompt);
+    await loading.message.edit(`動画をDiscord添付に変換しています... モデル: \`${result.model}\``).catch(() => {});
     await loading.message.edit({
       content: `**動画生成**\nモデル: \`${result.model}\`\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],

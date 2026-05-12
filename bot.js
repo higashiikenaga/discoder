@@ -54,9 +54,12 @@ const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
   .split(",")
   .map((model) => model.trim())
   .filter(Boolean);
-const TALK_CODING_STT_PROVIDER = String(process.env.TALK_CODING_STT_PROVIDER || "puter").toLowerCase();
+const TALK_CODING_STT_PROVIDER = String(process.env.TALK_CODING_STT_PROVIDER || "local_whisper").toLowerCase();
 const LOCAL_WHISPER_PYTHON = process.env.LOCAL_WHISPER_PYTHON || (process.platform === "win32" ? "python" : "python3");
 const LOCAL_WHISPER_TIMEOUT_MS = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 120000);
+const LOCAL_WHISPER_PERSISTENT = !["0", "false", "no", "off"].includes(
+  String(process.env.LOCAL_WHISPER_PERSISTENT || "true").toLowerCase()
+);
 const TALK_CODING_TTS_PROVIDER = String(process.env.TALK_CODING_TTS_PROVIDER || "qwen").toLowerCase();
 const QWEN_TTS_PYTHON = process.env.QWEN_TTS_PYTHON || LOCAL_WHISPER_PYTHON;
 const QWEN_TTS_TIMEOUT_MS = Number(process.env.QWEN_TTS_TIMEOUT_MS || 120000);
@@ -123,6 +126,7 @@ const WAKE_PATTERNS = [
 
 if (!DISCORD_TOKEN) throw new Error("DISCORD_TOKEN is not set.");
 let puterPromise = null;
+let localWhisperWorker = null;
 const sessions = new Map();
 
 function hasModule(name) {
@@ -827,9 +831,14 @@ async function transcribePcm(pcm) {
   return transcribePcmWithPuter(pcm);
 }
 
-function transcribePcmWithLocalWhisper(pcm) {
+async function transcribePcmWithLocalWhisper(pcm) {
   const started = Date.now();
   const wav = pcmStereoToWavBuffer(pcm);
+  if (LOCAL_WHISPER_PERSISTENT) {
+    const raw = await transcribeWavWithLocalWhisperWorker(wav);
+    raw.elapsed_ms = Date.now() - started;
+    return { text: extractText(raw).trim(), raw, model: raw.model || "local_whisper" };
+  }
   const result = childProcess.spawnSync(LOCAL_WHISPER_PYTHON, [path.join(__dirname, "local_whisper_stt.py")], {
     input: wav,
     encoding: "utf8",
@@ -851,6 +860,85 @@ function transcribePcmWithLocalWhisper(pcm) {
   if (result.status && !raw.error) raw = { ...raw, error: "process_failed", status: result.status, stderr: result.stderr };
   raw.elapsed_ms = Date.now() - started;
   return { text: extractText(raw).trim(), raw, model: raw.model || "local_whisper" };
+}
+
+function getLocalWhisperWorker() {
+  if (localWhisperWorker?.process && !localWhisperWorker.process.killed) return localWhisperWorker;
+
+  const workerPath = path.join(__dirname, "local_whisper_stt_worker.py");
+  const proc = childProcess.spawn(LOCAL_WHISPER_PYTHON, [workerPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      TALK_CODING_STT_LANGUAGE_CODE: STT_LANGUAGE,
+    },
+  });
+  const worker = {
+    process: proc,
+    stdout: "",
+    pending: [],
+  };
+  localWhisperWorker = worker;
+
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (data) => {
+    worker.stdout += data;
+    let newline;
+    while ((newline = worker.stdout.indexOf("\n")) !== -1) {
+      const line = worker.stdout.slice(0, newline).trim();
+      worker.stdout = worker.stdout.slice(newline + 1);
+      if (!line) continue;
+      const pending = worker.pending.shift();
+      if (!pending) continue;
+      clearTimeout(pending.timeout);
+      try {
+        pending.resolve(JSON.parse(line));
+      } catch {
+        pending.resolve({ text: "", error: "invalid_worker_json", stdout: line });
+      }
+    }
+  });
+  proc.stderr.on("data", (data) => {
+    if (DEBUG_STT) console.error(`[local_whisper] ${String(data).trim()}`);
+  });
+  proc.on("exit", (code, signal) => {
+    const error = new Error(`local_whisper worker exited code=${code ?? "null"} signal=${signal ?? "null"}`);
+    for (const pending of worker.pending.splice(0)) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    if (localWhisperWorker === worker) localWhisperWorker = null;
+  });
+  proc.on("error", (error) => {
+    for (const pending of worker.pending.splice(0)) {
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+    if (localWhisperWorker === worker) localWhisperWorker = null;
+  });
+
+  return worker;
+}
+
+function transcribeWavWithLocalWhisperWorker(wav) {
+  const worker = getLocalWhisperWorker();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const index = worker.pending.findIndex((item) => item.resolve === resolve);
+      if (index !== -1) worker.pending.splice(index, 1);
+      reject(new Error(`local_whisper worker timed out after ${Math.round(LOCAL_WHISPER_TIMEOUT_MS / 1000)}s`));
+    }, LOCAL_WHISPER_TIMEOUT_MS);
+    worker.pending.push({ resolve, reject, timeout });
+    const header = Buffer.allocUnsafe(4);
+    header.writeUInt32BE(wav.length, 0);
+    try {
+      worker.process.stdin.write(Buffer.concat([header, wav]));
+    } catch (error) {
+      clearTimeout(timeout);
+      worker.pending.pop();
+      reject(error);
+    }
+  });
 }
 
 async function transcribePcmWithPuter(pcm) {

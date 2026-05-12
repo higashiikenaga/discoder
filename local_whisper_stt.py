@@ -26,7 +26,7 @@ def main() -> int:
         )
         return 0
 
-    model_name = os.environ.get("LOCAL_WHISPER_MODEL", "base")
+    model_name = os.environ.get("LOCAL_WHISPER_MODEL", "tiny")
     device = os.environ.get("LOCAL_WHISPER_DEVICE", "cpu")
     compute_type = os.environ.get("LOCAL_WHISPER_COMPUTE_TYPE", "int8")
     language = os.environ.get("TALK_CODING_STT_LANGUAGE_CODE", "ja")

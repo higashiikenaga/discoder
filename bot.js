@@ -116,6 +116,7 @@ const LANGUAGE_CHOICES = [
 ];
 let opusReceiveAvailable = true;
 const WAKE_PATTERNS = [
+  /(?:オーダー|おーだー|オーダ|おーだ|おだー|order)\s*(?:たん|さん|ちゃん|tan)?/i,
   /(?:コー?ダー|こー?だー|こうだー?|こだー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i,
   /(?:coder|koder|corder)\s*(?:tan|さん|たん|ちゃん)?/i,
   /(?:コー|こー|こう)\s*(?:ダー|だー|だ)\s*(?:たん|さん|ちゃん)?/i,
@@ -625,11 +626,12 @@ function normalizeRecognizedWakeText(text) {
 
 function hasRecognizedWakeWord(text) {
   const normalized = normalizeRecognizedWakeText(text);
-  return /(?:コーダー|こーだー|こうだー|こだー|こら|おら|おーら)(?:たん|さん|ちゃん)?/.test(normalized);
+  return /(?:コーダー|こーだー|こうだー|こだー|こら|おら|おーら|オーダー|おーだー|オーダ|おーだ|おだー|order)(?:たん|さん|ちゃん|tan)?/.test(normalized);
 }
 
 function stripRecognizedWakeWord(text) {
   let output = text.trim();
+  output = output.replace(/(?:オーダー|おーだー|オーダ|おーだ|おだー|order)\s*(?:たん|さん|ちゃん|tan)?/i, "");
   output = output.replace(/(?:コー?\s*ダー|こー?\s*だー|こう\s*だー?|こ\s*だー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i, "");
   return output.replace(/^[\s、。,.!！?？:：;；\-ー〜～]+/, "").trim();
 }

@@ -2110,7 +2110,14 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
-  if (session && message.channel.id === session.textChannelId && mentioned && content) {
+  if (session && message.channel.id === session.textChannelId && mentioned) {
+    if (!content) {
+      await message.reply("VCセッション中です。メンションの後ろに内容を書いてください。");
+      return;
+    }
+    if (DEBUG_STT) {
+      console.log(`[talk] mention content guild=${message.guild.id} channel=${message.channel.id}: ${content}`);
+    }
     const member = await message.guild.members.fetch(message.author.id);
     await handleTalkText(session, member, content, false, { attachments: message.attachments });
     return;
@@ -2126,10 +2133,6 @@ client.on("messageCreate", async (message) => {
       }
       return;
     }
-  }
-
-  if (session && message.channel.id === session.textChannelId && mentioned) {
-    await message.reply("VCセッション中です。メンションの後ろに内容を書いてください。");
   }
 });
 

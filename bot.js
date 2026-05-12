@@ -456,6 +456,11 @@ function collectMediaSources(value, seen = new Set()) {
 }
 
 async function mediaResultToAttachment(value, name, fallbackMimeType) {
+  if (isInsufficientFundsResult(value)) {
+    const error = new Error("Insufficient funds");
+    error.code = "insufficient_funds";
+    throw error;
+  }
   const sources = collectMediaSources(value);
   let lastError = null;
   for (const source of sources) {
@@ -468,6 +473,15 @@ async function mediaResultToAttachment(value, name, fallbackMimeType) {
   const error = new Error(`generation returned unsupported media source: ${summarizeValue(value).slice(0, 500)}`);
   if (lastError) error.cause = lastError;
   throw error;
+}
+
+function isInsufficientFundsResult(value) {
+  if (value == null) return false;
+  if (typeof value === "string") return /insufficient[_\s-]?funds/i.test(value);
+  if (typeof value !== "object") return false;
+  const fields = [value.error, value.message, value.code, value.status, value.reason].map((item) => String(item || ""));
+  if (fields.some((field) => /insufficient[_\s-]?funds/i.test(field))) return true;
+  return [value.output, value.result, value.data].some(isInsufficientFundsResult);
 }
 
 function replaceExtension(name, ext) {
@@ -485,13 +499,18 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt) {
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate()) {
   const puter = await getPuter();
-  const model = puterVideoModelForDate();
+  const model = preferredModel;
   const options = { model };
   console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
   const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
   console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
+  if (isInsufficientFundsResult(video)) {
+    const error = new Error("Insufficient funds");
+    error.code = "insufficient_funds";
+    throw error;
+  }
   return {
     attachment: await mediaResultToAttachment(video, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
     model,
@@ -820,7 +839,7 @@ function isBotMentioned(message) {
   if (message.mentions.repliedUser?.id === id) return true;
   if (message.content.includes(`<@${id}>`) || message.content.includes(`<@!${id}>`)) return true;
   const username = client.user?.username;
-  return Boolean(username && new RegExp(`@?${escapeRegExp(username)}\\b`, "i").test(message.content));
+  return Boolean(username && new RegExp(`(^|\\s)@?${escapeRegExp(username)}(?=\\s|$)`, "i").test(message.content));
 }
 
 function stripBotMention(text) {
@@ -828,7 +847,7 @@ function stripBotMention(text) {
   let output = String(text || "");
   if (id) output = output.replace(new RegExp(`<@!?${escapeRegExp(id)}>`, "g"), "");
   const username = client.user?.username;
-  if (username) output = output.replace(new RegExp(`@?${escapeRegExp(username)}\\b`, "ig"), "");
+  if (username) output = output.replace(new RegExp(`(^|\\s)@?${escapeRegExp(username)}(?=\\s|$)`, "ig"), "$1");
   return output.trim();
 }
 
@@ -1783,10 +1802,25 @@ async function sendTalkVideoResult(session, text) {
   );
   try {
     await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
-    const result = await generateVideoAttachment(prompt);
+    let result;
+    try {
+      result = await generateVideoAttachment(prompt, model);
+    } catch (error) {
+      if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
+        const fallbackModel = "veo-3.1-lite-generate-preview";
+        await loading.message
+          .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
+          .catch(() => {});
+        result = await generateVideoAttachment(prompt, fallbackModel);
+        result.fallbackFrom = model;
+      } else {
+        throw error;
+      }
+    }
     await loading.message.edit(`動画をDiscord添付に変換しています... モデル: \`${result.model}\``).catch(() => {});
+    const fallbackText = result.fallbackFrom ? `\nSora2の残高不足により \`${result.model}\` に自動フォールバックしました。` : "";
     await loading.message.edit({
-      content: `**動画生成**\nモデル: \`${result.model}\`\n${notice}\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
+      content: `**動画生成**\nモデル: \`${result.model}\`${fallbackText}\n${notice}\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],
     });
   } catch (error) {

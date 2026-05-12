@@ -68,7 +68,8 @@ const PUTER_AI_TIMEOUT_MS = Number(process.env.PUTER_AI_TIMEOUT_MS || 90000);
 const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
-const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 800);
+const STT_END_SILENCE_MS = Number(process.env.TALK_CODING_STT_END_SILENCE_MS || 450);
+const STT_MAX_RECORDING_MS = Number(process.env.TALK_CODING_STT_MAX_RECORDING_MS || 3500);
 const STT_SCAN_SUBSCRIBE = isTruthy(process.env.TALK_CODING_STT_SCAN_SUBSCRIBE);
 const VOICE_DECRYPTION_FAILURE_TOLERANCE = Number(process.env.DISCORD_VOICE_DECRYPTION_FAILURE_TOLERANCE || 250);
 const VOICE_RECONNECT_INTERVAL_MS = Number(process.env.DISCORD_VOICE_RECONNECT_INTERVAL_MS || 5000);
@@ -634,7 +635,7 @@ function isLeaveRequest(text) {
 }
 
 function isCompleteRequest(text) {
-  return text.includes("完成");
+  return /(?:完成|完了|仕上げ|zip|final|done|complete)/i.test(text);
 }
 
 function findVoiceChannel(message) {
@@ -1098,7 +1099,7 @@ function shouldReceiveUser(session, userId) {
   return false;
 }
 
-function createPcmReceiveStream(connection, userId, endBehavior = { behavior: EndBehaviorType.Manual }) {
+function createPcmReceiveStream(connection, userId, endBehavior = { behavior: EndBehaviorType.AfterSilence, duration: STT_END_SILENCE_MS }) {
   const opus = connection.receiver.subscribe(userId, { end: endBehavior });
   const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
   const pcm = opus.pipe(decoder);
@@ -1271,9 +1272,11 @@ function subscribeUser(session, userId, reason = "speaking start") {
     chunks: [],
     bytes: 0,
     finalized: false,
-    timeout: setTimeout(() => finishVoiceSubscription(session, userId, "recording window"), 3500),
+    silenceTimer: null,
+    maxTimer: setTimeout(() => finishVoiceSubscription(session, userId, "recording window"), STT_MAX_RECORDING_MS),
     destroy() {
-      clearTimeout(this.timeout);
+      clearTimeout(this.silenceTimer);
+      clearTimeout(this.maxTimer);
       this.opus.destroy?.();
       this.decoder.destroy?.();
     },
@@ -1282,8 +1285,11 @@ function subscribeUser(session, userId, reason = "speaking start") {
   if (DEBUG_STT) session.textChannel.send(`[STT] subscribed ${userId} (${reason})`).catch(() => {});
 
   decoder.on("data", (chunk) => {
+    if (record.finalized) return;
     record.chunks.push(chunk);
     record.bytes += chunk.length;
+    clearTimeout(record.silenceTimer);
+    record.silenceTimer = setTimeout(() => finishVoiceSubscription(session, userId, "pcm silence"), STT_END_SILENCE_MS);
   });
   decoder.on("end", () => {
     if (DEBUG_STT) session.textChannel.send(`[STT] decoder ended ${userId} bytes=${record.bytes}`).catch(() => {});
@@ -1304,7 +1310,8 @@ function finishVoiceSubscription(session, userId, reason) {
   const record = session.subscriptions.get(userId);
   if (!record || record.finalized) return;
   record.finalized = true;
-  clearTimeout(record.timeout);
+  clearTimeout(record.silenceTimer);
+  clearTimeout(record.maxTimer);
   session.subscriptions.delete(userId);
   if (DEBUG_STT) session.textChannel.send(`[STT] finish ${userId}: ${reason} bytes=${record.bytes}`).catch(() => {});
   try {
@@ -1682,6 +1689,12 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
+  if (session && message.channel.id === session.textChannelId && mentioned && content) {
+    const member = await message.guild.members.fetch(message.author.id);
+    await handleTalkText(session, member, content, false);
+    return;
+  }
+
   if (mentioned) {
     const voiceChannel = findVoiceChannel(message);
     if (voiceChannel) {
@@ -1691,8 +1704,7 @@ client.on("messageCreate", async (message) => {
   }
 
   if (session && message.channel.id === session.textChannelId && mentioned) {
-    const member = await message.guild.members.fetch(message.author.id);
-    await handleTalkText(session, member, content, false);
+    await message.reply("VCセッション中です。メンションの後ろに内容を書いてください。");
   }
 });
 

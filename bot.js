@@ -1349,7 +1349,7 @@ async function startTalkSession(message, voiceChannel) {
   if (existing) {
     if (existing.ownerId !== message.author.id) {
       await message.reply("このサーバーでは別のトークコーディングが進行中です。開始した人が終了してから使ってください。");
-      return;
+      return null;
     }
     await stopTalkSession(message.guild.id);
   }
@@ -1394,7 +1394,7 @@ async function startTalkSession(message, voiceChannel) {
     console.error("[voice] Ready wait failed:", error?.stack || error);
     connection.destroy();
     await waitMessage.edit("VC接続が完了しませんでした。BotをVCから切断して、もう一度メンションしてください。");
-    return;
+    return null;
   }
 
   const session = {
@@ -1427,6 +1427,7 @@ async function startTalkSession(message, voiceChannel) {
 
   await reportVoiceDiagnostics(session, voiceChannel);
   await waitMessage.edit(`Coderたんが ${voiceChannel} に参加しました。現在はコーディングモードです。VCで「コーダーたん！」と呼ぶか、このチャンネルでメンションしてください。「雑談モード」「コーディングモード」で切り替えできます。`);
+  return session;
 }
 
 function attachVoiceReceiveDiagnostics(session) {
@@ -2118,7 +2119,11 @@ client.on("messageCreate", async (message) => {
   if (mentioned) {
     const voiceChannel = findVoiceChannel(message);
     if (voiceChannel) {
-      await startTalkSession(message, voiceChannel);
+      const startedSession = await startTalkSession(message, voiceChannel);
+      if (startedSession && content) {
+        const member = await message.guild.members.fetch(message.author.id);
+        await handleTalkText(startedSession, member, content, false, { attachments: message.attachments });
+      }
       return;
     }
   }

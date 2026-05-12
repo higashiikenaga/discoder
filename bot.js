@@ -21,6 +21,7 @@ const {
   AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ChannelType,
   Client,
   GatewayIntentBits,
   PermissionFlagsBits,
@@ -797,6 +798,12 @@ function findVoiceChannel(message) {
   return message.member?.voice?.channel || null;
 }
 
+function findInteractionVoiceChannel(interaction) {
+  const selected = interaction.options.getChannel("channel");
+  if (selected?.isVoiceBased()) return selected;
+  return interaction.member?.voice?.channel || null;
+}
+
 function isBotMentioned(message) {
   const id = client.user?.id;
   if (!id) return false;
@@ -1455,6 +1462,27 @@ async function startTalkSession(message, voiceChannel) {
   return session;
 }
 
+async function startTalkSessionFromInteraction(interaction, voiceChannel) {
+  const bridgeMessage = {
+    guild: interaction.guild,
+    guildId: interaction.guildId,
+    author: interaction.user,
+    member: interaction.member,
+    channel: interaction.channel,
+    reply: async (content) => {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(content);
+      } else {
+        await interaction.reply(content);
+      }
+      return {
+        edit: (nextContent) => interaction.editReply(nextContent),
+      };
+    },
+  };
+  return startTalkSession(bridgeMessage, voiceChannel);
+}
+
 function attachVoiceReceiveDiagnostics(session) {
   if (!DEBUG_STT || session.receiverDiagnosticsAttached) return;
   session.receiverDiagnosticsAttached = true;
@@ -1963,9 +1991,38 @@ client.once("clientReady", async () => {
           )
         )
       ),
-    new SlashCommandBuilder().setName("talk").setDescription("トークコーディング管理").addSubcommand((sub) =>
-      sub.setName("leave").setDescription("CoderたんをVCから退出させます")
-    ),
+    new SlashCommandBuilder()
+      .setName("talk")
+      .setDescription("VCトーク管理")
+      .addSubcommand((sub) =>
+        sub
+          .setName("join")
+          .setDescription("CoderたんをVCに参加させます")
+          .addChannelOption((option) =>
+            option
+              .setName("channel")
+              .setDescription("参加するVC。未指定なら自分がいるVC")
+              .setRequired(false)
+              .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+          )
+      )
+      .addSubcommand((sub) => sub.setName("leave").setDescription("CoderたんをVCから退出させます"))
+      .addSubcommand((sub) =>
+        sub
+          .setName("mode")
+          .setDescription("VCトークのモードを切り替えます")
+          .addStringOption((option) =>
+            option
+              .setName("mode")
+              .setDescription("切り替えるモード")
+              .setRequired(true)
+              .addChoices({ name: "雑談モード", value: "chat" }, { name: "コーディングモード", value: "coding" })
+          )
+      ),
+    new SlashCommandBuilder()
+      .setName("video")
+      .setDescription("Puter txt2vidで動画を生成します")
+      .addStringOption((option) => option.setName("prompt").setDescription("作りたい動画の内容").setRequired(true)),
     new SlashCommandBuilder()
       .setName("drive")
       .setDescription("Google Drive連携")
@@ -2114,8 +2171,45 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
   }
+  if (interaction.commandName === "video") {
+    const prompt = interaction.options.getString("prompt", true);
+    await interaction.reply("動画生成リクエストを受け付けました。生成中...");
+    try {
+      await sendDirectVideoResult(interaction.channel, prompt);
+      await interaction.editReply("動画生成が完了しました。結果はこのチャンネルに投稿しました。");
+    } catch (error) {
+      console.error("[slash video] failed:", error?.stack || error);
+      await interaction.editReply(`動画生成に失敗しました: \`${error.message || error}\``);
+    }
+    return;
+  }
   if (interaction.commandName !== "talk") return;
-  if (interaction.options.getSubcommand() === "leave") {
+  const talkSubcommand = interaction.options.getSubcommand();
+  if (talkSubcommand === "join") {
+    await interaction.deferReply();
+    const voiceChannel = findInteractionVoiceChannel(interaction);
+    if (!voiceChannel) {
+      await interaction.editReply("参加するVCを指定するか、先にVCへ入ってから `/talk join` を実行してください。");
+      return;
+    }
+    await startTalkSessionFromInteraction(interaction, voiceChannel);
+    return;
+  }
+  if (talkSubcommand === "mode") {
+    const session = sessions.get(interaction.guildId);
+    if (!session) {
+      await interaction.reply({ content: "`/talk join` でVCセッションを開始してから切り替えてください。", flags: 64 });
+      return;
+    }
+    if (session.ownerId !== interaction.user.id) {
+      await interaction.reply({ content: "開始した人だけがモードを切り替えできます。", flags: 64 });
+      return;
+    }
+    session.mode = interaction.options.getString("mode", true);
+    await interaction.reply(`現在は${session.mode === "chat" ? "雑談モード" : "コーディングモード"}です。`);
+    return;
+  }
+  if (talkSubcommand === "leave") {
     const session = sessions.get(interaction.guildId);
     if (session && session.ownerId !== interaction.user.id) {
       await interaction.reply({ content: "開始した人だけが退出できます。", flags: 64 });
@@ -2131,6 +2225,28 @@ client.on("messageCreate", async (message) => {
   const mentioned = isBotMentioned(message);
   const content = stripBotMention(message.content);
   const session = sessions.get(message.guild.id);
+
+  if (session && message.channel.id === session.textChannelId && content && isVideoRequest(content)) {
+    console.log(`[talk] session txt2vid request guild=${message.guild.id} channel=${message.channel.id} mentioned=${mentioned}: ${content}`);
+    if (session.busy) {
+      await message.reply("前の依頼を処理中です。少し待ってね。");
+      return;
+    }
+    session.busy = true;
+    await message.reply("動画生成リクエストを受け付けました。生成中...");
+    try {
+      await sendDirectVideoResult(message.channel, content);
+      session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
+      session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
+      session.history.splice(0, Math.max(0, session.history.length - 24));
+    } catch (error) {
+      console.error("[talk] session txt2vid failed:", error?.stack || error);
+      await message.channel.send(`動画生成に失敗しました: \`${error.message || error}\``).catch(() => {});
+    } finally {
+      session.busy = false;
+    }
+    return;
+  }
 
   if (mentioned && content && isVideoRequest(content)) {
     console.log(`[talk] direct txt2vid request guild=${message.guild.id} channel=${message.channel.id}: ${content}`);

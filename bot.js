@@ -121,7 +121,7 @@ const LANGUAGE_CHOICES = [
 let opusReceiveAvailable = true;
 const WAKE_PATTERNS = [
   /(?:オーダー|おーだー|オーダ|おーだ|おだー|order)\s*(?:たん|さん|ちゃん|tan)?/i,
-  /(?:コー?ダー|こー?だー|こうだー?|こだー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i,
+  /(?:コー?ダー?|こー?だー?|こうだー?|こうだ|こだー?|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i,
   /(?:coder|koder|corder)\s*(?:tan|さん|たん|ちゃん)?/i,
   /(?:コー|こー|こう)\s*(?:ダー|だー|だ)\s*(?:たん|さん|ちゃん)?/i,
   /コード\s*(?:たん|さん|ちゃん)?/i,
@@ -717,7 +717,10 @@ function hasWakeWord(text) {
 function stripWakeWord(text) {
   let output = text.trim();
   for (const pattern of WAKE_PATTERNS) output = output.replace(pattern, "").trim();
-  return output.replace(/^[、。!！?？:：\s-]+/, "").trim();
+  return output
+    .replace(/^(?:たん|さん|ちゃん|tan)(?=\s|[、。,.!！?？:：;；\-ー〜～]|画像|動画|イラスト|絵|アイコン|サムネ|壁紙|ビデオ|映像|image|video|picture|movie)/i, "")
+    .replace(/^[、。!！?？:：\s-]+/, "")
+    .trim();
 }
 
 function normalizeRecognizedWakeText(text) {
@@ -729,14 +732,17 @@ function normalizeRecognizedWakeText(text) {
 
 function hasRecognizedWakeWord(text) {
   const normalized = normalizeRecognizedWakeText(text);
-  return /(?:コーダー|こーだー|こうだー|こだー|こら|おら|おーら|オーダー|おーだー|オーダ|おーだ|おだー|order)(?:たん|さん|ちゃん|tan)?/.test(normalized);
+  return /(?:コーダー|コーダ|こーだー|こーだ|こうだー|こうだ|こだー|こだ|こら|おら|おーら|オーダー|おーだー|オーダ|おーだ|おだー|order)(?:たん|さん|ちゃん|tan)?/.test(normalized);
 }
 
 function stripRecognizedWakeWord(text) {
   let output = text.trim();
   output = output.replace(/(?:オーダー|おーだー|オーダ|おーだ|おだー|order)\s*(?:たん|さん|ちゃん|tan)?/i, "");
-  output = output.replace(/(?:コー?\s*ダー|こー?\s*だー|こう\s*だー?|こ\s*だー|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i, "");
-  return output.replace(/^[\s、。,.!！?？:：;；\-ー〜～]+/, "").trim();
+  output = output.replace(/(?:コー?\s*ダー?|こー?\s*だー?|こう\s*だー?|こ\s*だー?|こら|おら|おーら)\s*(?:たん|さん|ちゃん)?/i, "");
+  return output
+    .replace(/^(?:たん|さん|ちゃん|tan)(?=\s|[、。,.!！?？:：;；\-ー〜～]|画像|動画|イラスト|絵|アイコン|サムネ|壁紙|ビデオ|映像|image|video|picture|movie)/i, "")
+    .replace(/^[\s、。,.!！?？:：;；\-ー〜～]+/, "")
+    .trim();
 }
 
 function isLeaveRequest(text) {
@@ -1590,20 +1596,25 @@ function isVideoRequest(text) {
   return /(?:動画|ビデオ|映像|video|movie|txt2vid|生成|作って)/i.test(text) && /(?:動画|ビデオ|映像|video|movie|txt2vid)/i.test(text);
 }
 
-function extractImagePrompt(text) {
-  return String(text || "")
-    .replace(/(?:軽い|かるい)?\s*(?:画像|イラスト|絵|アイコン|サムネ|壁紙)\s*(?:生成|作成)?/gi, "")
-    .replace(/(?:を|で|に)?\s*(?:生成して|作って|描いて|お願い|ください|して)$/i, "")
-    .replace(/^(?:して|お願い|ください)\s*/i, "")
+function cleanupMediaPrompt(text, fallback) {
+  let output = stripRecognizedWakeWord(stripWakeWord(String(text || "")));
+  output = output
+    .replace(/^(?:軽い|かるい)\s*/, "")
+    .replace(/^(?:を|で|に)\s*/, "")
+    .replace(/(?:を|で|に)?\s*(?:生成して|生成|作って|つくって|描いて|お願い|ください|して)\s*$/i, "")
+    .replace(/^(?:生成して|作って|つくって|描いて|お願い|ください|して)\s*/i, "")
+    .replace(/^[\s、。,.!！?？:：;；\-ー〜～]+|[\s、。,.!！?？:：;；\-ー〜～]+$/g, "")
     .trim();
+  if (!output || /^(?:生成|作成|お願い|ください|して|作って|つくって|描いて)$/i.test(output)) return fallback;
+  return output;
+}
+
+function extractImagePrompt(text) {
+  return cleanupMediaPrompt(text, "画像");
 }
 
 function extractVideoPrompt(text) {
-  return String(text || "")
-    .replace(/(?:軽い|かるい)?\s*(?:動画|ビデオ|映像|video|movie|txt2vid)\s*(?:生成|作成)?/gi, "")
-    .replace(/(?:を|で|に)?\s*(?:生成して|作って|お願い|ください|して)$/i, "")
-    .replace(/^(?:して|お願い|ください)\s*/i, "")
-    .trim();
+  return cleanupMediaPrompt(text, "動画");
 }
 
 async function sendLoadingMessage(channel, initialText, intervalText) {

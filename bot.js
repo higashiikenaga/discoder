@@ -92,6 +92,7 @@ const DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 const NODE_DRIVE_TOKEN_PATH = path.join(__dirname, "node_google_tokens.json");
 const NODE_PUTER_TOKEN_PATH = path.join(__dirname, "node_puter_token.json");
 const OAUTH_STATES = new Map();
+const PUTER_AUTH_STATES = new Map();
 let driveOAuthServerStarted = false;
 const commandMemory = new Map();
 const publishResults = new Map();
@@ -132,6 +133,7 @@ const WAKE_PATTERNS = [
 
 if (!DISCORD_TOKEN) throw new Error("DISCORD_TOKEN is not set.");
 let puterPromise = null;
+const userPuterPromises = new Map();
 let localWhisperWorker = null;
 const sessions = new Map();
 
@@ -186,7 +188,15 @@ function isTruthy(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").toLowerCase());
 }
 
-async function getPuter() {
+async function getPuter(userId = null) {
+  const userToken = userId ? loadPuterToken(userId) : null;
+  if (userToken) {
+    const cached = userPuterPromises.get(userId);
+    if (cached?.token === userToken) return cached.promise;
+    const promise = import("@heyputer/puter.js/src/init.cjs").then(({ init }) => init(userToken));
+    userPuterPromises.set(userId, { token: userToken, promise });
+    return promise;
+  }
   if (!puterPromise) {
     puterPromise = import("@heyputer/puter.js/src/init.cjs").then(async ({ init, getAuthToken }) => {
       const authToken = await getPuterAuthToken(getAuthToken);
@@ -210,7 +220,20 @@ async function getPuterAuthToken(getAuthToken) {
   return token;
 }
 
-function loadPuterToken() {
+function loadPuterTokens() {
+  try {
+    return JSON.parse(fs.readFileSync(NODE_PUTER_TOKEN_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function loadPuterUserToken(userId) {
+  return loadPuterTokens().users?.[userId] || null;
+}
+
+function loadPuterToken(userId = null) {
+  if (userId) return loadPuterUserToken(userId);
   try {
     const data = JSON.parse(fs.readFileSync(NODE_PUTER_TOKEN_PATH, "utf8"));
     return data.authToken || null;
@@ -220,7 +243,28 @@ function loadPuterToken() {
 }
 
 function savePuterToken(authToken) {
-  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify({ authToken }, null, 2), "utf8");
+  const data = loadPuterTokens();
+  data.authToken = authToken;
+  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
+}
+
+function savePuterUserToken(userId, authToken) {
+  const data = loadPuterTokens();
+  data.users = data.users || {};
+  data.users[userId] = authToken;
+  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
+  userPuterPromises.delete(userId);
+}
+
+function deletePuterUserToken(userId) {
+  const data = loadPuterTokens();
+  if (data.users) delete data.users[userId];
+  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
+  userPuterPromises.delete(userId);
+}
+
+function hasPuterUserToken(userId) {
+  return Boolean(loadPuterUserToken(userId));
 }
 
 function extractText(response) {
@@ -314,8 +358,8 @@ Rules:
 `.trim();
 }
 
-async function generateProject(session, request) {
-  const response = await puterChat(buildProjectPrompt(request, session.history), PUTER_CHAT_MODEL, "talk final project");
+async function generateProject(session, request, userId = session.ownerId) {
+  const response = await puterChat(buildProjectPrompt(request, session.history), PUTER_CHAT_MODEL, "talk final project", userId);
   return validateProject(extractJson(extractText(response)));
 }
 
@@ -350,15 +394,15 @@ Rules:
 `.trim();
 }
 
-async function generateProjectForCommand(request, programmingLanguage, model, projectContext) {
+async function generateProjectForCommand(request, programmingLanguage, model, projectContext, userId = null) {
   const selectedModel = model || DEFAULT_CODE_MODEL;
-  const response = await puterChat(buildCommandProjectPrompt(request, programmingLanguage, projectContext), selectedModel, "project generation");
+  const response = await puterChat(buildCommandProjectPrompt(request, programmingLanguage, projectContext), selectedModel, "project generation", userId);
   return validateProject(extractJson(extractText(response)));
 }
 
-async function generateTextResponse(prompt, model) {
+async function generateTextResponse(prompt, model, userId = null) {
   const selectedModel = model || DEFAULT_CODE_MODEL;
-  const response = await puterChat(prompt, selectedModel, "text response");
+  const response = await puterChat(prompt, selectedModel, "text response", userId);
   return extractText(response).trim() || "回答を生成できませんでした。";
 }
 
@@ -387,8 +431,8 @@ async function imageSourceToAttachment(source, name = "generated-image.png") {
   throw new Error("image generation returned unsupported source");
 }
 
-async function generateImageAttachment(prompt) {
-  const puter = await getPuter();
+async function generateImageAttachment(prompt, userId = null) {
+  const puter = await getPuter(userId);
   const options = {
     provider: PUTER_IMAGE_PROVIDER,
     model: PUTER_IMAGE_MODEL,
@@ -499,8 +543,8 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate()) {
-  const puter = await getPuter();
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null) {
+  const puter = await getPuter(userId);
   const model = preferredModel;
   const options = { model };
   console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
@@ -517,8 +561,8 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
   };
 }
 
-async function extractTextFromImageSource(source) {
-  const puter = await getPuter();
+async function extractTextFromImageSource(source, userId = null) {
+  const puter = await getPuter(userId);
   const response = await withTimeout(
     puter.ai.img2txt(source, { provider: "aws-textract" }),
     "puter.ai.img2txt aws-textract",
@@ -555,8 +599,8 @@ async function withTimeout(promise, label, timeoutMs = PUTER_AI_TIMEOUT_MS) {
   }
 }
 
-async function puterChat(prompt, model, label) {
-  const puter = await getPuter();
+async function puterChat(prompt, model, label, userId = null) {
+  const puter = await getPuter(userId);
   const startedAt = Date.now();
   console.log(`[AI] ${label} start model=${model}`);
   try {
@@ -866,6 +910,16 @@ function googleRedirectUri() {
   return process.env.GOOGLE_REDIRECT_URI || "http://localhost:8080/oauth2callback";
 }
 
+function publicBaseUrl() {
+  if (process.env.GOOGLE_PUBLIC_BASE_URL) return process.env.GOOGLE_PUBLIC_BASE_URL.replace(/\/+$/, "");
+  const redirect = process.env.GOOGLE_REDIRECT_URI || "";
+  if (/^https?:\/\//i.test(redirect)) {
+    const url = new URL(redirect);
+    return `${url.protocol}//${url.host}`;
+  }
+  return "";
+}
+
 function googleDriveFolderName() {
   return process.env.GOOGLE_DRIVE_FOLDER_NAME || "DisCoder";
 }
@@ -887,17 +941,36 @@ function createOAuthClient() {
 }
 
 function startDriveOAuthServer() {
-  if (!googleOAuthConfigured()) return;
+  if (!googleOAuthConfigured() && !publicBaseUrl()) return;
   if (driveOAuthServerStarted) return;
   driveOAuthServerStarted = true;
-  const url = new URL(googleRedirectUri());
+  const url = new URL(googleOAuthConfigured() ? googleRedirectUri() : `${publicBaseUrl()}/puter-auth`);
   const port = Number(process.env.GOOGLE_OAUTH_PORT || url.port || 8080);
   const host = process.env.GOOGLE_OAUTH_HOST || "::";
   const server = http.createServer(async (req, res) => {
     const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+    if (requestUrl.pathname === "/puter-auth") {
+      const state = requestUrl.searchParams.get("state");
+      const token = requestUrl.searchParams.get("token");
+      const userId = PUTER_AUTH_STATES.get(state);
+      if (!state || !token || !userId) {
+        res.writeHead(400);
+        res.end("Invalid or expired Puter auth state.");
+        return;
+      }
+      PUTER_AUTH_STATES.delete(state);
+      savePuterUserToken(userId, token);
+      res.end("Puter connection completed. You can return to Discord.");
+      return;
+    }
     if (requestUrl.pathname !== "/oauth2callback") {
       res.writeHead(404);
       res.end("Not found");
+      return;
+    }
+    if (!googleOAuthConfigured()) {
+      res.writeHead(404);
+      res.end("Google OAuth is not configured.");
       return;
     }
     const state = requestUrl.searchParams.get("state");
@@ -925,7 +998,7 @@ function startDriveOAuthServer() {
     driveOAuthServerStarted = false;
     console.error("Google OAuth callback failed:", error.message);
   });
-  server.listen(port, host, () => console.log(`Google OAuth callback listening on ${host}:${port}`));
+  server.listen(port, host, () => console.log(`OAuth callback listening on ${host}:${port}`));
 }
 
 async function getDriveClient(userId) {
@@ -1188,8 +1261,8 @@ function summarizeValue(value, depth = 0) {
     .join(", ")}}`;
 }
 
-async function generateReply(session, userText) {
-  const puter = await getPuter();
+async function generateReply(session, userText, userId = session.ownerId) {
+  const puter = await getPuter(userId);
   const modeInstruction =
     session.mode === "chat"
       ? "You are Coder-tan in casual chat mode. Keep it light, friendly, and concise in Japanese. Do not generate full code unless explicitly asked."
@@ -1776,11 +1849,11 @@ async function sendTalkProjectResult(session, member, project) {
   });
 }
 
-async function sendTalkImageResult(session, text) {
+async function sendTalkImageResult(session, text, userId = null) {
   const prompt = extractImagePrompt(text) || text;
   const loading = await sendLoadingMessage(session.textChannel, `画像を生成中... \`${prompt.slice(0, 120)}\``, "画像を生成中...");
   try {
-    const attachment = await generateImageAttachment(prompt);
+    const attachment = await generateImageAttachment(prompt, userId);
     await loading.message.edit({
       content: `**画像生成**\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [attachment],
@@ -1790,7 +1863,7 @@ async function sendTalkImageResult(session, text) {
   }
 }
 
-async function sendTalkVideoResult(session, text) {
+async function sendTalkVideoResult(session, text, userId = null) {
   const prompt = extractVideoPrompt(text) || text;
   const model = puterVideoModelForDate();
   const notice = sora2MigrationNotice();
@@ -1804,14 +1877,14 @@ async function sendTalkVideoResult(session, text) {
     await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
     let result;
     try {
-      result = await generateVideoAttachment(prompt, model);
+      result = await generateVideoAttachment(prompt, model, userId);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
         const fallbackModel = "veo-3.1-lite-generate-preview";
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(prompt, fallbackModel);
+        result = await generateVideoAttachment(prompt, fallbackModel, userId);
         result.fallbackFrom = model;
       } else {
         throw error;
@@ -1835,7 +1908,11 @@ async function sendDirectVideoResult(channel, text) {
   await sendTalkVideoResult({ textChannel: channel }, text);
 }
 
-async function sendTalkImageTextResult(session, text, attachments) {
+async function sendDirectVideoResultForUser(channel, text, userId) {
+  await sendTalkVideoResult({ textChannel: channel }, text, userId);
+}
+
+async function sendTalkImageTextResult(session, text, attachments, userId = null) {
   const image = attachments.find((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
   if (!image) {
     await session.textChannel.send("読み取れる画像添付が見つかりませんでした。");
@@ -1843,7 +1920,7 @@ async function sendTalkImageTextResult(session, text, attachments) {
   }
   const loading = await sendLoadingMessage(session.textChannel, "画像の文字を読み取り中...", "画像の文字を読み取り中...");
   try {
-    const result = await extractTextFromImageSource(image.url);
+    const result = await extractTextFromImageSource(image.url, userId);
     await loading.message.edit(`**画像文字読み取り**\n${result || "文字を検出できませんでした。"}`.slice(0, 2000));
   } finally {
     loading.stop();
@@ -1890,21 +1967,21 @@ async function handleTalkText(session, member, rawText, fromVoice = false, optio
     const attachments = [...(options.attachments?.values?.() || options.attachments || [])];
     session.history.push({ role: "user", content: `${member.displayName}: ${text}` });
     if (isImageToTextRequest(text, attachments)) {
-      await sendTalkImageTextResult(session, text, attachments);
+      await sendTalkImageTextResult(session, text, attachments, member.id);
       session.history.push({ role: "assistant", content: "画像から文字を読み取りました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
       await playTts(session, "画像の文字を読み取ったよ。");
       return;
     }
     if (isVideoRequest(text)) {
-      await sendTalkVideoResult(session, text);
+      await sendTalkVideoResult(session, text, member.id);
       session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
       await playTts(session, "動画を送ったよ。");
       return;
     }
     if (isImageRequest(text)) {
-      await sendTalkImageResult(session, text);
+      await sendTalkImageResult(session, text, member.id);
       session.history.push({ role: "assistant", content: "画像を生成して投稿しました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
       await playTts(session, "画像を送ったよ。");
@@ -1912,7 +1989,7 @@ async function handleTalkText(session, member, rawText, fromVoice = false, optio
     }
     if (session.mode === "coding" && shouldGenerateTalkProject(text)) {
       await session.textChannel.send("zip付きの完成形を生成しています...");
-      const project = await generateProject(session, text);
+      const project = await generateProject(session, text, member.id);
       await sendTalkProjectResult(session, member, project);
       const summary = `${project.title}: ${project.summary}`;
       session.history.push({ role: "assistant", content: summary });
@@ -1920,7 +1997,7 @@ async function handleTalkText(session, member, rawText, fromVoice = false, optio
       await playTts(session, "完成形をzipで送ったよ。");
       return;
     }
-    const reply = await generateReply(session, text);
+    const reply = await generateReply(session, text, member.id);
     session.history.push({ role: "assistant", content: reply });
     session.history.splice(0, Math.max(0, session.history.length - 24));
     await session.textChannel.send(`**Coderたん**\n${reply.slice(0, 1900)}`);
@@ -1942,7 +2019,7 @@ async function completeTalkSession(session, member) {
   await session.textChannel.send("完成したよ！こんな感じ？ファイルとプレビューをまとめるね。");
   await playTts(session, "完成したよ。ファイルとプレビューをまとめるね。");
   try {
-    const project = await generateProject(session, "Create the final completed project from this talk-coding session.");
+      const project = await generateProject(session, "Create the final completed project from this talk-coding session.", member.id);
     const attachments = await buildProjectAttachments(project);
     const links = await uploadAttachmentsToDrive(session.ownerId, attachments).catch((error) => {
       console.error("Drive upload failed:", error.message);
@@ -2068,6 +2145,12 @@ client.once("clientReady", async () => {
       .setDescription("Puter txt2vidで動画を生成します")
       .addStringOption((option) => option.setName("prompt").setDescription("作りたい動画の内容").setRequired(true)),
     new SlashCommandBuilder()
+      .setName("puter")
+      .setDescription("Puterユーザー連携")
+      .addSubcommand((sub) => sub.setName("connect").setDescription("自分のPuterアカウントをこのbotに連携します"))
+      .addSubcommand((sub) => sub.setName("status").setDescription("Puter連携状態を確認します"))
+      .addSubcommand((sub) => sub.setName("disconnect").setDescription("Puter連携を解除します")),
+    new SlashCommandBuilder()
       .setName("drive")
       .setDescription("Google Drive連携")
       .addSubcommand((sub) => sub.setName("connect").setDescription("Google Drive連携URLを発行します"))
@@ -2118,7 +2201,7 @@ client.on("interactionCreate", async (interaction) => {
       const programmingLanguage = interaction.options.getString("programming_language", true);
       const model = interaction.options.getString("model") || DEFAULT_CODE_MODEL;
       await updateInteractionProgress(interaction, `コードを生成しています... モデル: \`${model}\``);
-      const project = await generateProjectForCommand(content, programmingLanguage, model, buildMemoryContext(interaction));
+      const project = await generateProjectForCommand(content, programmingLanguage, model, buildMemoryContext(interaction), interaction.user.id);
       await sendProjectResult(interaction, project, model, programmingLanguage);
       rememberCommand(interaction, `coder: ${project.title}. Request: ${content}. Language: ${programmingLanguage}. Files: ${project.files.length}.`);
     } catch (error) {
@@ -2136,7 +2219,7 @@ client.on("interactionCreate", async (interaction) => {
       await updateInteractionProgress(interaction, `レビューしています... モデル: \`${model}\``);
       const fileText = await attachmentToText(interaction.options.getAttachment("file"));
       const fullCode = `${code}\n\n${fileText}`.trim();
-      const response = await generateTextResponse(buildReviewPrompt(fullCode, programmingLanguage, buildMemoryContext(interaction)), model);
+      const response = await generateTextResponse(buildReviewPrompt(fullCode, programmingLanguage, buildMemoryContext(interaction)), model, interaction.user.id);
       await interaction.editReply(`**Code Review**\n${response}\n\nモデル: \`${model}\``.slice(0, 2000));
       rememberCommand(interaction, `review: ${programmingLanguage}. Response: ${response.slice(0, 500)}`);
     } catch (error) {
@@ -2155,7 +2238,7 @@ client.on("interactionCreate", async (interaction) => {
       await updateInteractionProgress(interaction, `解析しています... モデル: \`${model}\``);
       const fileText = await attachmentToText(interaction.options.getAttachment("file"));
       const fullCode = `${code}\n\n${fileText}`.trim();
-      const response = await generateTextResponse(buildDebugPrompt(errorText, fullCode || null, programmingLanguage, buildMemoryContext(interaction)), model);
+      const response = await generateTextResponse(buildDebugPrompt(errorText, fullCode || null, programmingLanguage, buildMemoryContext(interaction)), model, interaction.user.id);
       await interaction.editReply(`**Debug Analysis**\n${response}\n\nモデル: \`${model}\``.slice(0, 2000));
       rememberCommand(interaction, `debug: ${programmingLanguage}. Error: ${errorText.slice(0, 250)}. Response: ${response.slice(0, 500)}`);
     } catch (error) {
@@ -2174,7 +2257,7 @@ client.on("interactionCreate", async (interaction) => {
         const model = interaction.options.getString("model") || DEFAULT_CODE_MODEL;
         await updateInteractionProgress(interaction, `機能を生成しています... モデル: \`${model}\``);
         const request = `Implement this as a focused feature addition for the known project. Reuse project context when relevant and avoid unrelated rewrites.\n\n${feature}`;
-        const project = await generateProjectForCommand(request, programmingLanguage, model, buildMemoryContext(interaction));
+        const project = await generateProjectForCommand(request, programmingLanguage, model, buildMemoryContext(interaction), interaction.user.id);
         await sendProjectResult(interaction, project, model, programmingLanguage);
         rememberCommand(interaction, `generate feature: ${project.title}. Request: ${feature}. Language: ${programmingLanguage}. Files: ${project.files.length}.`);
       } catch (error) {
@@ -2219,13 +2302,44 @@ client.on("interactionCreate", async (interaction) => {
     const prompt = interaction.options.getString("prompt", true);
     await interaction.reply(`動画生成リクエストを受け付けました。生成中...\n${sora2MigrationNotice()}`);
     try {
-      await sendDirectVideoResult(interaction.channel, prompt);
+      await sendDirectVideoResultForUser(interaction.channel, prompt, interaction.user.id);
       await interaction.editReply("動画生成が完了しました。結果はこのチャンネルに投稿しました。");
     } catch (error) {
       console.error("[slash video] failed:", error?.stack || error);
       await interaction.editReply(`動画生成に失敗しました: \`${error.message || error}\``);
     }
     return;
+  }
+  if (interaction.commandName === "puter") {
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === "connect") {
+      const baseUrl = publicBaseUrl();
+      if (!baseUrl) {
+        await interaction.reply({ content: "Puter連携には公開URLが必要です。`GOOGLE_PUBLIC_BASE_URL` などで ngrok のURLを設定してください。", flags: 64 });
+        return;
+      }
+      const state = crypto.randomBytes(24).toString("hex");
+      PUTER_AUTH_STATES.set(state, interaction.user.id);
+      const redirectUrl = `${baseUrl}/puter-auth?state=${state}`;
+      const url = `https://puter.com/?action=authme&redirectURL=${encodeURIComponent(redirectUrl)}`;
+      await interaction.reply({
+        content: `以下のURLからPuterにログインしてください。完了後、このDiscordユーザーのPuterトークンとして保存します。\n${url}`,
+        flags: 64,
+      });
+      return;
+    }
+    if (subcommand === "status") {
+      await interaction.reply({
+        content: hasPuterUserToken(interaction.user.id) ? "Puter連携済みです。このユーザーのPuter残高でAI生成します。" : "Puter未連携です。`/puter connect` で連携できます。",
+        flags: 64,
+      });
+      return;
+    }
+    if (subcommand === "disconnect") {
+      deletePuterUserToken(interaction.user.id);
+      await interaction.reply({ content: "Puter連携を解除しました。", flags: 64 });
+      return;
+    }
   }
   if (interaction.commandName !== "talk") return;
   const talkSubcommand = interaction.options.getSubcommand();
@@ -2279,7 +2393,7 @@ client.on("messageCreate", async (message) => {
     session.busy = true;
     await message.reply("動画生成リクエストを受け付けました。生成中...");
     try {
-      await sendDirectVideoResult(message.channel, content);
+      await sendDirectVideoResultForUser(message.channel, content, message.author.id);
       session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
       session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
@@ -2301,7 +2415,7 @@ client.on("messageCreate", async (message) => {
     if (session) session.busy = true;
     await message.reply("動画生成リクエストを受け付けました。生成中...");
     try {
-      await sendDirectVideoResult(message.channel, content);
+      await sendDirectVideoResultForUser(message.channel, content, message.author.id);
       if (session) {
         session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
         session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });

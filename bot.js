@@ -402,6 +402,64 @@ async function generateImageAttachment(prompt) {
   return imageSourceToAttachment(image?.src || String(image), `${safeName(prompt || "generated-image")}.png`);
 }
 
+function puterVideoModelForDate(now = new Date()) {
+  const soraEndExclusiveJst = new Date("2026-09-25T00:00:00+09:00");
+  return now.getTime() < soraEndExclusiveJst.getTime() ? "sora-2" : "veo-3.1-lite-generate-preview";
+}
+
+async function mediaSourceToAttachment(source, name, fallbackMimeType = "application/octet-stream") {
+  const data = dataUrlToBuffer(source);
+  if (data) {
+    const ext = extensionForMimeType(data.mimeType, path.extname(name).slice(1) || "bin");
+    return new AttachmentBuilder(data.buffer, { name: replaceExtension(name, ext) });
+  }
+  if (/^https?:\/\//i.test(String(source || ""))) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`media fetch failed: ${response.status}`);
+    const contentType = response.headers.get("content-type") || fallbackMimeType;
+    const ext = extensionForMimeType(contentType, path.extname(name).slice(1) || "bin");
+    return new AttachmentBuilder(Buffer.from(await response.arrayBuffer()), { name: replaceExtension(name, ext) });
+  }
+  throw new Error("generation returned unsupported media source");
+}
+
+function replaceExtension(name, ext) {
+  return String(name || "generated-media.bin").replace(/\.[A-Za-z0-9]+$/i, `.${ext}`);
+}
+
+function extensionForMimeType(mimeType, fallback = "bin") {
+  const type = String(mimeType || "").toLowerCase();
+  if (type.includes("jpeg")) return "jpg";
+  if (type.includes("png")) return "png";
+  if (type.includes("webp")) return "webp";
+  if (type.includes("mp4")) return "mp4";
+  if (type.includes("webm")) return "webm";
+  if (type.includes("quicktime")) return "mov";
+  return fallback;
+}
+
+async function generateVideoAttachment(prompt) {
+  const puter = await getPuter();
+  const model = puterVideoModelForDate();
+  const options = { model, seconds: model === "sora-2" ? 4 : 4, size: "1280x720" };
+  const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
+  const source = video?.src || video?.getAttribute?.("data-source") || video?.url || String(video);
+  return {
+    attachment: await mediaSourceToAttachment(source, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
+    model,
+  };
+}
+
+async function extractTextFromImageSource(source) {
+  const puter = await getPuter();
+  const response = await withTimeout(
+    puter.ai.img2txt(source, { provider: "aws-textract" }),
+    "puter.ai.img2txt aws-textract",
+    PUTER_AI_TIMEOUT_MS
+  );
+  return extractText(response).trim();
+}
+
 async function updateInteractionProgress(interaction, message) {
   try {
     if (interaction.deferred || interaction.replied) {
@@ -1524,12 +1582,42 @@ function isImageRequest(text) {
   return /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust|生成|描いて|作って)/i.test(text) && /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust)/i.test(text);
 }
 
+function isImageToTextRequest(text, attachments = []) {
+  return attachments.length > 0 && /(?:画像.*(?:文字|テキスト|読|ocr)|(?:文字|テキスト).*(?:抽出|読|起こ)|img2txt|ocr|読み取|読んで)/i.test(text);
+}
+
+function isVideoRequest(text) {
+  return /(?:動画|ビデオ|映像|video|movie|txt2vid|生成|作って)/i.test(text) && /(?:動画|ビデオ|映像|video|movie|txt2vid)/i.test(text);
+}
+
 function extractImagePrompt(text) {
   return String(text || "")
     .replace(/(?:軽い|かるい)?\s*(?:画像|イラスト|絵|アイコン|サムネ|壁紙)\s*(?:生成|作成)?/gi, "")
     .replace(/(?:を|で|に)?\s*(?:生成して|作って|描いて|お願い|ください|して)$/i, "")
     .replace(/^(?:して|お願い|ください)\s*/i, "")
     .trim();
+}
+
+function extractVideoPrompt(text) {
+  return String(text || "")
+    .replace(/(?:軽い|かるい)?\s*(?:動画|ビデオ|映像|video|movie|txt2vid)\s*(?:生成|作成)?/gi, "")
+    .replace(/(?:を|で|に)?\s*(?:生成して|作って|お願い|ください|して)$/i, "")
+    .replace(/^(?:して|お願い|ください)\s*/i, "")
+    .trim();
+}
+
+async function sendLoadingMessage(channel, initialText, intervalText) {
+  const startedAt = Date.now();
+  const message = await channel.send(initialText);
+  const timer = setInterval(() => {
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    message.edit(`${intervalText} 経過 ${seconds} 秒`).catch(() => {});
+  }, 15000);
+  return {
+    message,
+    stop: () => clearInterval(timer),
+    elapsedSeconds: () => Math.floor((Date.now() - startedAt) / 1000),
+  };
 }
 
 async function sendTalkProjectResult(session, member, project) {
@@ -1547,15 +1635,53 @@ async function sendTalkProjectResult(session, member, project) {
 
 async function sendTalkImageResult(session, text) {
   const prompt = extractImagePrompt(text) || text;
-  await session.textChannel.send(`画像を生成しています... \`${prompt.slice(0, 120)}\``);
-  const attachment = await generateImageAttachment(prompt);
-  await session.textChannel.send({
-    content: `**画像生成**\n${prompt}`.slice(0, 2000),
-    files: [attachment],
-  });
+  const loading = await sendLoadingMessage(session.textChannel, `画像を生成中... \`${prompt.slice(0, 120)}\``, "画像を生成中...");
+  try {
+    const attachment = await generateImageAttachment(prompt);
+    await loading.message.edit({
+      content: `**画像生成**\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
+      files: [attachment],
+    });
+  } finally {
+    loading.stop();
+  }
 }
 
-async function handleTalkText(session, member, rawText, fromVoice = false) {
+async function sendTalkVideoResult(session, text) {
+  const prompt = extractVideoPrompt(text) || text;
+  const model = puterVideoModelForDate();
+  const loading = await sendLoadingMessage(
+    session.textChannel,
+    `動画を生成中... モデル: \`${model}\`\n\`${prompt.slice(0, 160)}\``,
+    `動画を生成中... モデル: \`${model}\``
+  );
+  try {
+    const result = await generateVideoAttachment(prompt);
+    await loading.message.edit({
+      content: `**動画生成**\nモデル: \`${result.model}\`\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
+      files: [result.attachment],
+    });
+  } finally {
+    loading.stop();
+  }
+}
+
+async function sendTalkImageTextResult(session, text, attachments) {
+  const image = attachments.find((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
+  if (!image) {
+    await session.textChannel.send("読み取れる画像添付が見つかりませんでした。");
+    return;
+  }
+  const loading = await sendLoadingMessage(session.textChannel, "画像の文字を読み取り中...", "画像の文字を読み取り中...");
+  try {
+    const result = await extractTextFromImageSource(image.url);
+    await loading.message.edit(`**画像文字読み取り**\n${result || "文字を検出できませんでした。"}`.slice(0, 2000));
+  } finally {
+    loading.stop();
+  }
+}
+
+async function handleTalkText(session, member, rawText, fromVoice = false, options = {}) {
   let text = rawText.trim();
   if (fromVoice) {
     const hasWake = hasWakeWord(text) || hasRecognizedWakeWord(text);
@@ -1592,8 +1718,23 @@ async function handleTalkText(session, member, rawText, fromVoice = false) {
   }
   session.busy = true;
   try {
+    const attachments = [...(options.attachments?.values?.() || options.attachments || [])];
     session.history.push({ role: "user", content: `${member.displayName}: ${text}` });
-    if (isImageRequest(text) && (session.mode === "chat" || !shouldGenerateTalkProject(text))) {
+    if (isImageToTextRequest(text, attachments)) {
+      await sendTalkImageTextResult(session, text, attachments);
+      session.history.push({ role: "assistant", content: "画像から文字を読み取りました。" });
+      session.history.splice(0, Math.max(0, session.history.length - 24));
+      await playTts(session, "画像の文字を読み取ったよ。");
+      return;
+    }
+    if (isVideoRequest(text)) {
+      await sendTalkVideoResult(session, text);
+      session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
+      session.history.splice(0, Math.max(0, session.history.length - 24));
+      await playTts(session, "動画を送ったよ。");
+      return;
+    }
+    if (isImageRequest(text)) {
       await sendTalkImageResult(session, text);
       session.history.push({ role: "assistant", content: "画像を生成して投稿しました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
@@ -1615,6 +1756,9 @@ async function handleTalkText(session, member, rawText, fromVoice = false) {
     session.history.splice(0, Math.max(0, session.history.length - 24));
     await session.textChannel.send(`**Coderたん**\n${reply.slice(0, 1900)}`);
     await playTts(session, reply);
+  } catch (error) {
+    console.error("[talk] request failed:", error?.stack || error);
+    await session.textChannel.send(`処理に失敗しました: \`${error.message || error}\``).catch(() => {});
   } finally {
     session.busy = false;
   }
@@ -1903,7 +2047,7 @@ client.on("messageCreate", async (message) => {
 
   if (session && message.channel.id === session.textChannelId && mentioned && content) {
     const member = await message.guild.members.fetch(message.author.id);
-    await handleTalkText(session, member, content, false);
+    await handleTalkText(session, member, content, false, { attachments: message.attachments });
     return;
   }
 

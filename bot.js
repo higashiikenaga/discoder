@@ -49,6 +49,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const PUTER_AUTH_TOKEN = process.env.PUTER_AUTH_TOKEN;
 const PUTER_CHAT_MODEL = process.env.PUTER_CHAT_MODEL || "gemini-3-flash-preview";
 const DEFAULT_CODE_MODEL = process.env.PUTER_CODE_MODEL || PUTER_CHAT_MODEL;
+const PUTER_IMAGE_MODEL = process.env.PUTER_IMAGE_MODEL || "gemini-2.5-flash-image-preview";
 const PUTER_STT_MODEL = process.env.PUTER_STT_MODEL || "gpt-4o-mini-transcribe";
 const PUTER_STT_MODELS = String(process.env.PUTER_STT_MODELS || PUTER_STT_MODEL)
   .split(",")
@@ -355,6 +356,41 @@ async function generateTextResponse(prompt, model) {
   const selectedModel = model || DEFAULT_CODE_MODEL;
   const response = await puterChat(prompt, selectedModel, "text response");
   return extractText(response).trim() || "回答を生成できませんでした。";
+}
+
+function dataUrlToBuffer(dataUrl) {
+  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+  if (!match) return null;
+  const mimeType = match[1] || "application/octet-stream";
+  const body = match[3] || "";
+  const buffer = match[2] ? Buffer.from(body, "base64") : Buffer.from(decodeURIComponent(body), "utf8");
+  return { buffer, mimeType };
+}
+
+async function imageSourceToAttachment(source, name = "generated-image.png") {
+  const data = dataUrlToBuffer(source);
+  if (data) {
+    const ext = data.mimeType.includes("jpeg") ? "jpg" : data.mimeType.includes("webp") ? "webp" : "png";
+    return new AttachmentBuilder(data.buffer, { name: name.replace(/\.png$/i, `.${ext}`) });
+  }
+  if (/^https?:\/\//i.test(String(source || ""))) {
+    const response = await fetch(source);
+    if (!response.ok) throw new Error(`image fetch failed: ${response.status}`);
+    const contentType = response.headers.get("content-type") || "image/png";
+    const ext = contentType.includes("jpeg") ? "jpg" : contentType.includes("webp") ? "webp" : "png";
+    return new AttachmentBuilder(Buffer.from(await response.arrayBuffer()), { name: name.replace(/\.png$/i, `.${ext}`) });
+  }
+  throw new Error("image generation returned unsupported source");
+}
+
+async function generateImageAttachment(prompt) {
+  const puter = await getPuter();
+  const image = await withTimeout(
+    puter.ai.txt2img(prompt, { model: PUTER_IMAGE_MODEL, ratio: { w: 1024, h: 1024 } }),
+    `puter.ai.txt2img ${PUTER_IMAGE_MODEL}`,
+    PUTER_AI_TIMEOUT_MS
+  );
+  return imageSourceToAttachment(image?.src || String(image), `${safeName(prompt || "generated-image")}.png`);
 }
 
 async function updateInteractionProgress(interaction, message) {
@@ -985,11 +1021,14 @@ function summarizeValue(value, depth = 0) {
 
 async function generateReply(session, userText) {
   const puter = await getPuter();
+  const modeInstruction =
+    session.mode === "chat"
+      ? "You are Coder-tan in casual chat mode. Keep it light, friendly, and concise in Japanese. Do not generate full code unless explicitly asked."
+      : "You are Coder-tan, a concise Japanese Discord VC coding assistant. Answer in Japanese. Generate code when useful. Keep replies short for TTS.";
   const messages = [
     {
       role: "system",
-      content:
-        "You are Coder-tan, a concise Japanese Discord VC coding assistant. Answer in Japanese. Generate code when useful. Keep replies short for TTS.",
+      content: modeInstruction,
     },
     ...session.history.slice(-16),
     { role: "user", content: userText },
@@ -1258,6 +1297,7 @@ async function startTalkSession(message, voiceChannel) {
     connection,
     player,
     history: [],
+    mode: "coding",
     armedUntil: 0,
     subscriptions: new Map(),
     busy: false,
@@ -1277,7 +1317,7 @@ async function startTalkSession(message, voiceChannel) {
   attachVoiceReceiveDiagnostics(session);
 
   await reportVoiceDiagnostics(session, voiceChannel);
-  await waitMessage.edit(`Coderたんが ${voiceChannel} に参加しました。VCで「コーダーたん！」と呼ぶか、このチャンネルでメンションしてください。`);
+  await waitMessage.edit(`Coderたんが ${voiceChannel} に参加しました。現在はコーディングモードです。VCで「コーダーたん！」と呼ぶか、このチャンネルでメンションしてください。「雑談モード」「コーディングモード」で切り替えできます。`);
 }
 
 function attachVoiceReceiveDiagnostics(session) {
@@ -1465,6 +1505,24 @@ function shouldGenerateTalkProject(text) {
   );
 }
 
+function getRequestedTalkMode(text) {
+  if (/(?:雑談|会話|おしゃべり|チャット)\s*モード/i.test(text)) return "chat";
+  if (/(?:コーディング|コード|開発|制作|作業)\s*モード/i.test(text)) return "coding";
+  return null;
+}
+
+function isImageRequest(text) {
+  return /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust|生成|描いて|作って)/i.test(text) && /(?:画像|イラスト|絵|アイコン|サムネ|壁紙|image|picture|illust)/i.test(text);
+}
+
+function extractImagePrompt(text) {
+  return String(text || "")
+    .replace(/(?:軽い|かるい)?\s*(?:画像|イラスト|絵|アイコン|サムネ|壁紙)\s*(?:生成|作成)?/gi, "")
+    .replace(/(?:を|で|に)?\s*(?:生成して|作って|描いて|お願い|ください|して)$/i, "")
+    .replace(/^(?:して|お願い|ください)\s*/i, "")
+    .trim();
+}
+
 async function sendTalkProjectResult(session, member, project) {
   const attachments = await buildProjectAttachments(project);
   const links = await uploadAttachmentsToDrive(member.id, attachments).catch((error) => {
@@ -1475,6 +1533,16 @@ async function sendTalkProjectResult(session, member, project) {
   await session.textChannel.send({
     content: `**${project.title}**\n${project.summary}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${driveText}`.slice(0, 2000),
     files: attachments,
+  });
+}
+
+async function sendTalkImageResult(session, text) {
+  const prompt = extractImagePrompt(text) || text;
+  await session.textChannel.send(`画像を生成しています... \`${prompt.slice(0, 120)}\``);
+  const attachment = await generateImageAttachment(prompt);
+  await session.textChannel.send({
+    content: `**画像生成**\n${prompt}`.slice(0, 2000),
+    files: [attachment],
   });
 }
 
@@ -1495,6 +1563,15 @@ async function handleTalkText(session, member, rawText, fromVoice = false) {
     }
   }
 
+  const requestedMode = getRequestedTalkMode(text);
+  if (requestedMode) {
+    session.mode = requestedMode;
+    const label = requestedMode === "chat" ? "雑談モード" : "コーディングモード";
+    await session.textChannel.send(`${label}に切り替えました。`);
+    await playTts(session, `${label}に切り替えたよ。`);
+    return;
+  }
+
   if (member.id === session.ownerId && isCompleteRequest(text)) {
     await completeTalkSession(session, member);
     return;
@@ -1507,7 +1584,14 @@ async function handleTalkText(session, member, rawText, fromVoice = false) {
   session.busy = true;
   try {
     session.history.push({ role: "user", content: `${member.displayName}: ${text}` });
-    if (shouldGenerateTalkProject(text)) {
+    if (isImageRequest(text) && (session.mode === "chat" || !shouldGenerateTalkProject(text))) {
+      await sendTalkImageResult(session, text);
+      session.history.push({ role: "assistant", content: "画像を生成して投稿しました。" });
+      session.history.splice(0, Math.max(0, session.history.length - 24));
+      await playTts(session, "画像を送ったよ。");
+      return;
+    }
+    if (session.mode === "coding" && shouldGenerateTalkProject(text)) {
       await session.textChannel.send("zip付きの完成形を生成しています...");
       const project = await generateProject(session, text);
       await sendTalkProjectResult(session, member, project);

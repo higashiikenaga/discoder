@@ -639,7 +639,7 @@ function isLeaveRequest(text) {
 }
 
 function isCompleteRequest(text) {
-  return /(?:完成|完了|仕上げ|zip|final|done|complete)/i.test(text);
+  return /^(?:これで)?\s*(?:完成|完了|仕上げ|final|done|complete)\s*(?:して|お願い|です|だよ|[!！。.]*)?$/i.test(text.trim());
 }
 
 function findVoiceChannel(message) {
@@ -1456,6 +1456,26 @@ async function handleVoiceChunk(session, userId, pcm) {
   await handleTalkText(session, member, text, true);
 }
 
+function shouldGenerateTalkProject(text) {
+  const normalized = String(text || "").toLowerCase();
+  return /(?:html5?|css|javascript|js|typescript|ts|python|react|vue|next\.?js|node\.?js|discord\.?py|コード|ソース|プログラム|アプリ|ゲーム|サイト|ページ|画面|ui|ファイル|zip|完成形|実装|作成|生成|作って|つくって|書いて|修正|変更|追加)/i.test(
+    normalized
+  );
+}
+
+async function sendTalkProjectResult(session, member, project) {
+  const attachments = await buildProjectAttachments(project);
+  const links = await uploadAttachmentsToDrive(member.id, attachments).catch((error) => {
+    console.error("Drive upload failed:", error.message);
+    return [];
+  });
+  const driveText = links.length ? `\nGoogle Drive: 保存しました。\n${links.slice(0, 5).join("\n")}` : "";
+  await session.textChannel.send({
+    content: `**${project.title}**\n${project.summary}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${driveText}`.slice(0, 2000),
+    files: attachments,
+  });
+}
+
 async function handleTalkText(session, member, rawText, fromVoice = false) {
   let text = rawText.trim();
   if (fromVoice) {
@@ -1485,6 +1505,16 @@ async function handleTalkText(session, member, rawText, fromVoice = false) {
   session.busy = true;
   try {
     session.history.push({ role: "user", content: `${member.displayName}: ${text}` });
+    if (shouldGenerateTalkProject(text)) {
+      await session.textChannel.send("zip付きの完成形を生成しています...");
+      const project = await generateProject(session, text);
+      await sendTalkProjectResult(session, member, project);
+      const summary = `${project.title}: ${project.summary}`;
+      session.history.push({ role: "assistant", content: summary });
+      session.history.splice(0, Math.max(0, session.history.length - 24));
+      await playTts(session, "完成形をzipで送ったよ。");
+      return;
+    }
     const reply = await generateReply(session, text);
     session.history.push({ role: "assistant", content: reply });
     session.history.splice(0, Math.max(0, session.history.length - 24));

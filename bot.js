@@ -404,8 +404,17 @@ async function generateImageAttachment(prompt) {
 }
 
 function puterVideoModelForDate(now = new Date()) {
-  const soraEndExclusiveJst = new Date("2026-09-25T00:00:00+09:00");
+  const soraEndExclusiveJst = new Date("2026-09-24T00:00:00+09:00");
   return now.getTime() < soraEndExclusiveJst.getTime() ? "sora-2" : "veo-3.1-lite-generate-preview";
+}
+
+function isSora2Available(now = new Date()) {
+  return puterVideoModelForDate(now) === "sora-2";
+}
+
+function sora2MigrationNotice(now = new Date()) {
+  if (!isSora2Available(now)) return "当botでのOpenAI Sora2の提供は終了しました。今後はGoogle Veoに移行します。";
+  return "9月24日でSora2のAPI提供が終了するため、今後はGoogle Veoに移行します。";
 }
 
 async function mediaSourceToAttachment(source, name, fallbackMimeType = "application/octet-stream") {
@@ -1765,18 +1774,19 @@ async function sendTalkImageResult(session, text) {
 async function sendTalkVideoResult(session, text) {
   const prompt = extractVideoPrompt(text) || text;
   const model = puterVideoModelForDate();
+  const notice = sora2MigrationNotice();
   console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} model=${model}`);
   const loading = await sendLoadingMessage(
     session.textChannel,
-    `動画を生成中... モデル: \`${model}\`\n\`${prompt.slice(0, 160)}\``,
-    `動画を生成中... モデル: \`${model}\``
+    `動画を生成中... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``,
+    `動画を生成中... モデル: \`${model}\`\n${notice}`
   );
   try {
-    await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n\`${prompt.slice(0, 160)}\``).catch(() => {});
+    await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
     const result = await generateVideoAttachment(prompt);
     await loading.message.edit(`動画をDiscord添付に変換しています... モデル: \`${result.model}\``).catch(() => {});
     await loading.message.edit({
-      content: `**動画生成**\nモデル: \`${result.model}\`\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
+      content: `**動画生成**\nモデル: \`${result.model}\`\n${notice}\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],
     });
   } catch (error) {
@@ -2173,7 +2183,7 @@ client.on("interactionCreate", async (interaction) => {
   }
   if (interaction.commandName === "video") {
     const prompt = interaction.options.getString("prompt", true);
-    await interaction.reply("動画生成リクエストを受け付けました。生成中...");
+    await interaction.reply(`動画生成リクエストを受け付けました。生成中...\n${sora2MigrationNotice()}`);
     try {
       await sendDirectVideoResult(interaction.channel, prompt);
       await interaction.editReply("動画生成が完了しました。結果はこのチャンネルに投稿しました。");

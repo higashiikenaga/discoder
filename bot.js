@@ -75,6 +75,9 @@ const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
 const PUTER_AI_TIMEOUT_MS = Number(process.env.PUTER_AI_TIMEOUT_MS || 90000);
 const OPENROUTER_API_BASE = process.env.OPENROUTER_API_BASE || "https://openrouter.ai/api/v1";
 const OPENROUTER_DEFAULT_MODEL = process.env.OPENROUTER_DEFAULT_MODEL || "openai/gpt-4o-mini";
+const OPENROUTER_IMAGE_MODEL = process.env.OPENROUTER_IMAGE_MODEL || "openai/gpt-5-image-mini";
+const OPENROUTER_VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "openai/gpt-4o-mini";
+const OPENROUTER_VIDEO_MODEL = process.env.OPENROUTER_VIDEO_MODEL || "bytedance/seedance-2.0-fast";
 const OPENROUTER_USD_JPY = Number(process.env.OPENROUTER_USD_JPY || 155);
 const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
@@ -107,6 +110,28 @@ const MODEL_CHOICES = [
   "openrouter/openai/gpt-4o-mini",
   "openrouter/google/gemini-2.5-flash",
   "openrouter/anthropic/claude-3.5-sonnet",
+];
+const MEDIA_PROVIDER_CHOICES = [
+  { name: "auto", value: "auto" },
+  { name: "puter", value: "puter" },
+  { name: "openrouter", value: "openrouter" },
+];
+const OPENROUTER_IMAGE_MODEL_CHOICES = [
+  "openai/gpt-5-image-mini",
+  "google/gemini-2.5-flash-image",
+  "black-forest-labs/flux-2-pro",
+  "bytedance/seedream-4.5",
+];
+const OPENROUTER_VIDEO_MODEL_CHOICES = [
+  "bytedance/seedance-2.0-fast",
+  "alibaba/wan-2.6",
+  "alibaba/wan-2.7",
+  "google/veo-3.1",
+];
+const OPENROUTER_VISION_MODEL_CHOICES = [
+  "openai/gpt-4o-mini",
+  "google/gemini-2.5-flash",
+  "anthropic/claude-3.5-sonnet",
 ];
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
@@ -272,6 +297,12 @@ function saveOpenRouterConfig(userId, config) {
   data.openrouter[userId] = {
     apiKey: config.apiKey,
     model: config.model || OPENROUTER_DEFAULT_MODEL,
+    imageModel: config.imageModel || OPENROUTER_IMAGE_MODEL,
+    visionModel: config.visionModel || OPENROUTER_VISION_MODEL,
+    videoModel: config.videoModel || OPENROUTER_VIDEO_MODEL,
+    imageProvider: config.imageProvider || "auto",
+    visionProvider: config.visionProvider || "auto",
+    videoProvider: config.videoProvider || "auto",
     fallbackEnabled: config.fallbackEnabled !== false,
   };
   fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
@@ -285,6 +316,36 @@ function deleteOpenRouterConfig(userId) {
 
 function hasOpenRouterConfig(userId) {
   return Boolean(loadOpenRouterConfig(userId)?.apiKey);
+}
+
+function openRouterMediaConfig(userId) {
+  const config = loadOpenRouterConfig(userId) || {};
+  return {
+    ...config,
+    imageModel: config.imageModel || OPENROUTER_IMAGE_MODEL,
+    visionModel: config.visionModel || OPENROUTER_VISION_MODEL,
+    videoModel: config.videoModel || OPENROUTER_VIDEO_MODEL,
+    imageProvider: config.imageProvider || "auto",
+    visionProvider: config.visionProvider || "auto",
+    videoProvider: config.videoProvider || "auto",
+    fallbackEnabled: config.fallbackEnabled !== false,
+  };
+}
+
+function shouldUseOpenRouterMedia(userId, kind) {
+  const config = openRouterMediaConfig(userId);
+  const provider = config[`${kind}Provider`] || "auto";
+  if (provider === "openrouter") {
+    if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
+    return true;
+  }
+  return false;
+}
+
+function shouldFallbackToOpenRouterMedia(error, userId, kind) {
+  const config = openRouterMediaConfig(userId);
+  const provider = config[`${kind}Provider`] || "auto";
+  return Boolean(config.apiKey && config.fallbackEnabled && provider !== "puter" && isPuterAiCreditLimitError(error));
 }
 
 function deletePuterUserToken(userId) {
@@ -500,6 +561,9 @@ async function imageSourceToAttachment(source, name = "generated-image.png") {
     const ext = data.mimeType.includes("jpeg") ? "jpg" : data.mimeType.includes("webp") ? "webp" : "png";
     return new AttachmentBuilder(data.buffer, { name: name.replace(/\.png$/i, `.${ext}`) });
   }
+  if (/^[A-Za-z0-9+/]+={0,2}$/.test(String(source || "")) && String(source || "").length > 1000) {
+    return new AttachmentBuilder(Buffer.from(String(source), "base64"), { name });
+  }
   if (/^https?:\/\//i.test(String(source || ""))) {
     const response = await fetch(source);
     if (!response.ok) throw new Error(`image fetch failed: ${response.status}`);
@@ -511,19 +575,25 @@ async function imageSourceToAttachment(source, name = "generated-image.png") {
 }
 
 async function generateImageAttachment(prompt, userId = null) {
-  const puter = await getPuter(userId);
-  const options = {
-    provider: PUTER_IMAGE_PROVIDER,
-    model: PUTER_IMAGE_MODEL,
-    quality: PUTER_IMAGE_QUALITY,
-    test_mode: PUTER_IMAGE_TEST_MODE,
-  };
-  const image = await withTimeout(
-    puter.ai.txt2img(prompt, options),
-    `puter.ai.txt2img ${PUTER_IMAGE_MODEL}`,
-    PUTER_AI_TIMEOUT_MS
-  );
-  return imageSourceToAttachment(image?.src || String(image), `${safeName(prompt || "generated-image")}.png`);
+  if (shouldUseOpenRouterMedia(userId, "image")) return generateOpenRouterImageAttachment(prompt, userId);
+  try {
+    const puter = await getPuter(userId);
+    const options = {
+      provider: PUTER_IMAGE_PROVIDER,
+      model: PUTER_IMAGE_MODEL,
+      quality: PUTER_IMAGE_QUALITY,
+      test_mode: PUTER_IMAGE_TEST_MODE,
+    };
+    const image = await withTimeout(
+      puter.ai.txt2img(prompt, options),
+      `puter.ai.txt2img ${PUTER_IMAGE_MODEL}`,
+      PUTER_AI_TIMEOUT_MS
+    );
+    return await imageSourceToAttachment(image?.src || String(image), `${safeName(prompt || "generated-image")}.png`);
+  } catch (error) {
+    if (shouldFallbackToOpenRouterMedia(error, userId, "image")) return generateOpenRouterImageAttachment(prompt, userId, true);
+    throw error;
+  }
 }
 
 function puterVideoModelForDate(now = new Date()) {
@@ -563,7 +633,7 @@ function collectMediaSources(value, seen = new Set()) {
   seen.add(value);
 
   const sources = [];
-  for (const key of ["src", "url", "href", "asset_url", "source", "data", "download_url", "video_url", "output", "result"]) {
+  for (const key of ["src", "url", "href", "asset_url", "source", "data", "download_url", "video_url", "image_url", "b64_json", "output", "result", "choices", "message", "images", "content"]) {
     if (value[key] != null) sources.push(...collectMediaSources(value[key], seen));
   }
   if (typeof value.getAttribute === "function") {
@@ -641,31 +711,43 @@ function extensionForMimeType(mimeType, fallback = "bin") {
 }
 
 async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null) {
-  const puter = await getPuter(userId);
+  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId);
   const model = preferredModel;
-  const options = { model };
-  console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
-  const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
-  console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
-  if (isInsufficientFundsResult(video)) {
-    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
-    error.code = "insufficient_funds";
+  try {
+    const puter = await getPuter(userId);
+    const options = { model };
+    console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
+    const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
+    console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
+    if (isInsufficientFundsResult(video)) {
+      const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
+      error.code = "insufficient_funds";
+      throw error;
+    }
+    return {
+      attachment: await mediaResultToAttachment(video, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
+      model,
+    };
+  } catch (error) {
+    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true);
     throw error;
   }
-  return {
-    attachment: await mediaResultToAttachment(video, `${safeName(prompt || "generated-video")}.mp4`, "video/mp4"),
-    model,
-  };
 }
 
 async function extractTextFromImageSource(source, userId = null) {
+  if (shouldUseOpenRouterMedia(userId, "vision")) return extractTextFromImageSourceWithOpenRouter(source, userId);
   const puter = await getPuter(userId);
-  const response = await withTimeout(
-    puter.ai.img2txt(source, { provider: "aws-textract" }),
-    "puter.ai.img2txt aws-textract",
-    PUTER_AI_TIMEOUT_MS
-  );
-  return extractText(response).trim();
+  try {
+    const response = await withTimeout(
+      puter.ai.img2txt(source, { provider: "aws-textract" }),
+      "puter.ai.img2txt aws-textract",
+      PUTER_AI_TIMEOUT_MS
+    );
+    return extractText(response).trim();
+  } catch (error) {
+    if (shouldFallbackToOpenRouterMedia(error, userId, "vision")) return extractTextFromImageSourceWithOpenRouter(source, userId, true);
+    throw error;
+  }
 }
 
 async function updateInteractionProgress(interaction, message) {
@@ -756,6 +838,146 @@ async function attachOpenRouterCost(response, apiKey) {
   if (!Number.isFinite(costUsd)) return;
   response.__discoder_ai.costUsd = costUsd;
   response.__discoder_ai.costJpy = costUsd * OPENROUTER_USD_JPY;
+}
+
+async function generateOpenRouterImageAttachment(prompt, userId, fallback = false) {
+  const config = openRouterMediaConfig(userId);
+  if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
+  const model = config.imageModel;
+  const response = await withTimeout(
+    fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/higashiikenaga/discoder",
+        "X-Title": "DisCoder",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: String(prompt) }],
+        modalities: ["image", "text"],
+        stream: false,
+      }),
+    }),
+    `openrouter.image ${model}`,
+    180000
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`OpenRouter image ${response.status}: ${extractText(data) || summarizeValue(data).slice(0, 300)}`);
+  data.__discoder_ai = { provider: "OpenRouter", model, fallback };
+  await attachOpenRouterCost(data, config.apiKey).catch((error) => console.warn("[OpenRouter] image cost lookup failed:", error.message));
+  let attachment = null;
+  for (const source of collectMediaSources(data)) {
+    try {
+      attachment = await imageSourceToAttachment(source, `${safeName(prompt || "generated-image")}.png`);
+      break;
+    } catch {
+    }
+  }
+  if (!attachment) throw new Error(`OpenRouter image returned no usable image source: ${summarizeValue(data).slice(0, 500)}`);
+  attachment.__discoder_ai = data.__discoder_ai;
+  return attachment;
+}
+
+async function extractTextFromImageSourceWithOpenRouter(source, userId, fallback = false) {
+  const config = openRouterMediaConfig(userId);
+  if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
+  const model = config.visionModel;
+  const response = await openRouterChat(
+    [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "この画像を日本語で読み取り、文字があればOCR結果も含めて簡潔に説明してください。" },
+          { type: "image_url", image_url: { url: source } },
+        ],
+      },
+    ],
+    `openrouter/${model}`,
+    "openrouter vision",
+    userId
+  );
+  if (response.__discoder_ai) response.__discoder_ai.fallback = fallback;
+  const usageLine = aiUsageLine(response);
+  return `${extractText(response).trim()}${usageLine ? `\n\n${usageLine}` : ""}`.trim();
+}
+
+async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false) {
+  const config = openRouterMediaConfig(userId);
+  if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
+  const model = config.videoModel;
+  const createResponse = await withTimeout(
+    fetch(`${OPENROUTER_API_BASE}/videos`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/higashiikenaga/discoder",
+        "X-Title": "DisCoder",
+      },
+      body: JSON.stringify({
+        model,
+        prompt: String(prompt),
+        duration: 5,
+        resolution: "720p",
+        aspect_ratio: "16:9",
+      }),
+    }),
+    `openrouter.video.create ${model}`,
+    30000
+  );
+  const created = await createResponse.json().catch(() => ({}));
+  if (!createResponse.ok) throw new Error(`OpenRouter video ${createResponse.status}: ${extractText(created) || summarizeValue(created).slice(0, 300)}`);
+  const jobId = created.id || created.data?.id || created.job_id || created.data?.job_id;
+  if (!jobId) throw new Error(`OpenRouter video did not return a job id: ${summarizeValue(created).slice(0, 300)}`);
+  const job = await pollOpenRouterVideoJob(jobId, config.apiKey);
+  const contentUrl = `${OPENROUTER_API_BASE}/videos/${encodeURIComponent(jobId)}/content`;
+  const contentResponse = await withTimeout(
+    fetch(contentUrl, { headers: { Authorization: `Bearer ${config.apiKey}` } }),
+    `openrouter.video.content ${model}`,
+    60000
+  );
+  if (!contentResponse.ok) throw new Error(`OpenRouter video content ${contentResponse.status}`);
+  const contentType = contentResponse.headers.get("content-type") || "video/mp4";
+  const attachment = new AttachmentBuilder(Buffer.from(await contentResponse.arrayBuffer()), {
+    name: replaceExtension(`${safeName(prompt || "generated-video")}.mp4`, extensionForMimeType(contentType, "mp4")),
+  });
+  return {
+    attachment,
+    model,
+    provider: "OpenRouter",
+    fallbackFrom: fallback ? "puter" : null,
+    ai_meta: openRouterVideoUsageMeta(job, model, fallback),
+  };
+}
+
+async function pollOpenRouterVideoJob(jobId, apiKey) {
+  const deadline = Date.now() + 10 * 60 * 1000;
+  let last = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${OPENROUTER_API_BASE}/videos/${encodeURIComponent(jobId)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    last = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`OpenRouter video poll ${response.status}: ${summarizeValue(last).slice(0, 300)}`);
+    const status = String(last.status || last.data?.status || "").toLowerCase();
+    if (["completed", "succeeded", "success", "done"].includes(status)) return last;
+    if (["failed", "error", "cancelled", "canceled"].includes(status)) throw new Error(`OpenRouter video failed: ${summarizeValue(last).slice(0, 400)}`);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  throw new Error(`OpenRouter video timed out: ${summarizeValue(last).slice(0, 300)}`);
+}
+
+function openRouterVideoUsageMeta(job, model, fallback) {
+  const costUsd = Number(job?.data?.total_cost ?? job?.total_cost ?? job?.data?.cost ?? job?.cost);
+  return {
+    provider: "OpenRouter",
+    model,
+    fallback,
+    costUsd: Number.isFinite(costUsd) ? costUsd : undefined,
+    costJpy: Number.isFinite(costUsd) ? costUsd * OPENROUTER_USD_JPY : undefined,
+  };
 }
 
 function aiUsageMeta(response) {
@@ -2065,10 +2287,12 @@ async function sendTalkImageResult(session, text, userId = null) {
   const loading = await sendLoadingMessage(session.textChannel, `画像を生成中... \`${prompt.slice(0, 120)}\``, "画像を生成中...");
   try {
     const attachment = await generateImageAttachment(prompt, userId);
+    const usageLine = attachment.__discoder_ai ? aiUsageLine({ ai_meta: attachment.__discoder_ai }) : "";
     await loading.message.edit({
       content: `**画像生成**\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [attachment],
     });
+    if (usageLine) await session.textChannel.send(usageLine).catch(() => {});
   } finally {
     loading.stop();
   }
@@ -2087,8 +2311,10 @@ async function sendTalkVideoResult(session, text, userId = null) {
   try {
     await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
     let result;
+    let usageLine = "";
     try {
       result = await generateVideoAttachment(prompt, model, userId);
+      usageLine = aiUsageLine(result);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
         const fallbackModel = "veo-3.1-lite-generate-preview";
@@ -2096,6 +2322,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
         result = await generateVideoAttachment(prompt, fallbackModel, userId);
+        usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
         throw error;
@@ -2107,6 +2334,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
       content: `**動画生成**\nモデル: \`${result.model}\`${fallbackText}\n${notice}\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],
     });
+    if (usageLine) await session.textChannel.send(usageLine).catch(() => {});
   } catch (error) {
     await loading.message.edit(`動画生成は完了しましたが、Discord添付に変換できませんでした: \`${error.message}\``.slice(0, 2000)).catch(() => {});
     throw error;
@@ -2371,7 +2599,24 @@ client.once("clientReady", async () => {
           .setName("connect")
           .setDescription("Save your own OpenRouter API key")
           .addStringOption((option) => option.setName("api_key").setDescription("OpenRouter API key").setRequired(true))
-          .addStringOption((option) => option.setName("model").setDescription("Default OpenRouter model").setRequired(false))
+          .addStringOption((option) => option.setName("model").setDescription("Default OpenRouter text model").setRequired(false))
+          .addStringOption((option) => option.setName("image_model").setDescription("Default OpenRouter image model").setRequired(false))
+          .addStringOption((option) => option.setName("vision_model").setDescription("Default OpenRouter vision/OCR model").setRequired(false))
+          .addStringOption((option) => option.setName("video_model").setDescription("Default OpenRouter video model").setRequired(false))
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("media")
+          .setDescription("Set image/video/vision provider routing")
+          .addStringOption((option) =>
+            option.setName("kind").setDescription("Media kind").setRequired(true).addChoices(
+              { name: "image", value: "image" },
+              { name: "vision", value: "vision" },
+              { name: "video", value: "video" }
+            )
+          )
+          .addStringOption((option) => option.setName("provider").setDescription("Provider route").setRequired(true).addChoices(...MEDIA_PROVIDER_CHOICES))
+          .addStringOption((option) => option.setName("model").setDescription("OpenRouter model for this media kind").setRequired(false))
       )
       .addSubcommand((sub) =>
         sub
@@ -2577,9 +2822,31 @@ client.on("interactionCreate", async (interaction) => {
     if (subcommand === "connect") {
       const apiKey = interaction.options.getString("api_key", true).trim();
       const model = (interaction.options.getString("model") || OPENROUTER_DEFAULT_MODEL).trim();
-      saveOpenRouterConfig(interaction.user.id, { apiKey, model, fallbackEnabled: true });
+      const imageModel = (interaction.options.getString("image_model") || OPENROUTER_IMAGE_MODEL).trim();
+      const visionModel = (interaction.options.getString("vision_model") || OPENROUTER_VISION_MODEL).trim();
+      const videoModel = (interaction.options.getString("video_model") || OPENROUTER_VIDEO_MODEL).trim();
+      saveOpenRouterConfig(interaction.user.id, { apiKey, model, imageModel, visionModel, videoModel, fallbackEnabled: true });
       await interaction.reply({
-        content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーで \`${model}\` にフォールバックします。\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
+        content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーへフォールバックします。\nText: \`${model}\`\nImage: \`${imageModel}\`\nVision: \`${visionModel}\`\nVideo: \`${videoModel}\`\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
+        flags: 64,
+      });
+      return;
+    }
+    if (subcommand === "media") {
+      const config = loadOpenRouterConfig(interaction.user.id);
+      if (!config?.apiKey) {
+        await interaction.reply({ content: "OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。", flags: 64 });
+        return;
+      }
+      const kind = interaction.options.getString("kind", true);
+      const provider = interaction.options.getString("provider", true);
+      const model = interaction.options.getString("model");
+      const next = { ...openRouterMediaConfig(interaction.user.id), apiKey: config.apiKey };
+      next[`${kind}Provider`] = provider;
+      if (model) next[`${kind}Model`] = model.trim();
+      saveOpenRouterConfig(interaction.user.id, next);
+      await interaction.reply({
+        content: `${kind} の経路を \`${provider}\` にしました。${next[`${kind}Model`] ? `OpenRouter model: \`${next[`${kind}Model`]}\`` : ""}`,
         flags: 64,
       });
       return;
@@ -2599,7 +2866,7 @@ client.on("interactionCreate", async (interaction) => {
       const config = loadOpenRouterConfig(interaction.user.id);
       await interaction.reply({
         content: config?.apiKey
-          ? `OpenRouter連携済みです。\nモデル: \`${config.model || OPENROUTER_DEFAULT_MODEL}\`\nPuter上限時フォールバック: ${config.fallbackEnabled !== false ? "有効" : "無効"}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`
+          ? `OpenRouter連携済みです。\nText: \`${config.model || OPENROUTER_DEFAULT_MODEL}\`\nImage: \`${config.imageModel || OPENROUTER_IMAGE_MODEL}\` (${config.imageProvider || "auto"})\nVision: \`${config.visionModel || OPENROUTER_VISION_MODEL}\` (${config.visionProvider || "auto"})\nVideo: \`${config.videoModel || OPENROUTER_VIDEO_MODEL}\` (${config.videoProvider || "auto"})\nPuter上限時フォールバック: ${config.fallbackEnabled !== false ? "有効" : "無効"}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`
           : "OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。",
         flags: 64,
       });

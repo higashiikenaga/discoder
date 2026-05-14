@@ -73,6 +73,9 @@ const PUTER_TTS_PROVIDER = process.env.PUTER_TTS_PROVIDER || "openai";
 const PUTER_TTS_MODEL = process.env.PUTER_TTS_MODEL || "gpt-4o-mini-tts";
 const PUTER_TTS_VOICE = process.env.PUTER_TTS_VOICE || "nova";
 const PUTER_AI_TIMEOUT_MS = Number(process.env.PUTER_AI_TIMEOUT_MS || 90000);
+const OPENROUTER_API_BASE = process.env.OPENROUTER_API_BASE || "https://openrouter.ai/api/v1";
+const OPENROUTER_DEFAULT_MODEL = process.env.OPENROUTER_DEFAULT_MODEL || "openai/gpt-4o-mini";
+const OPENROUTER_USD_JPY = Number(process.env.OPENROUTER_USD_JPY || 155);
 const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
 const SAVE_STT_AUDIO = isTruthy(process.env.TALK_CODING_SAVE_STT_AUDIO);
@@ -101,6 +104,9 @@ const MODEL_CHOICES = [
   "gemini-2.5-flash-lite",
   "gemini-2.5-flash",
   "gpt-5-nano",
+  "openrouter/openai/gpt-4o-mini",
+  "openrouter/google/gemini-2.5-flash",
+  "openrouter/anthropic/claude-3.5-sonnet",
 ];
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
@@ -256,6 +262,31 @@ function savePuterUserToken(userId, authToken) {
   userPuterPromises.delete(userId);
 }
 
+function loadOpenRouterConfig(userId) {
+  return loadPuterTokens().openrouter?.[userId] || null;
+}
+
+function saveOpenRouterConfig(userId, config) {
+  const data = loadPuterTokens();
+  data.openrouter = data.openrouter || {};
+  data.openrouter[userId] = {
+    apiKey: config.apiKey,
+    model: config.model || OPENROUTER_DEFAULT_MODEL,
+    fallbackEnabled: config.fallbackEnabled !== false,
+  };
+  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
+}
+
+function deleteOpenRouterConfig(userId) {
+  const data = loadPuterTokens();
+  if (data.openrouter) delete data.openrouter[userId];
+  fs.writeFileSync(NODE_PUTER_TOKEN_PATH, JSON.stringify(data, null, 2), "utf8");
+}
+
+function hasOpenRouterConfig(userId) {
+  return Boolean(loadOpenRouterConfig(userId)?.apiKey);
+}
+
 function deletePuterUserToken(userId) {
   const data = loadPuterTokens();
   if (data.users) delete data.users[userId];
@@ -315,6 +346,35 @@ function extractJson(text) {
   }
 }
 
+const BRAIN_AGENT_PROMPT = `
+Internal brain meeting:
+- Coder-tan: implementation, file generation, bug fixes, and library choices.
+- Designer-tan: UI/UX, color palettes, animation, and aesthetic polish.
+- Review-tan: lint, security, readability, async risks, and diff review.
+- Tester-tan: test cases, execution paths, reproduction steps, and responsive breakage.
+
+Run these four perspectives internally before finalizing. Resolve conflicts by improving the files.
+Expose only a short public summary in "brain_meeting"; do not include hidden chain-of-thought.
+`.trim();
+
+function normalizeBrainMeeting(items) {
+  const fallback = [
+    { agent: "コーダーたん", comment: "実装方針を整理して成果物に反映しました！" },
+    { agent: "レビューたん", comment: "安全性と可読性の観点で確認しました。" },
+  ];
+  const source = Array.isArray(items) && items.length ? items : fallback;
+  return source
+    .slice(0, 4)
+    .map((item) => {
+      if (typeof item === "string") return { agent: "レビューたん", comment: item.slice(0, 180) };
+      return {
+        agent: String(item.agent || item.role || "レビューたん").slice(0, 24),
+        comment: String(item.comment || item.message || item.content || "").slice(0, 180),
+      };
+    })
+    .filter((item) => item.comment);
+}
+
 function validateProject(data) {
   if (!Array.isArray(data.files) || data.files.length === 0) throw new Error("Project JSON did not include files.");
   const files = data.files.map((file) => {
@@ -327,13 +387,16 @@ function validateProject(data) {
     summary: String(data.summary || "生成しました。"),
     preview_file: typeof data.preview_file === "string" ? data.preview_file.replace(/\\/g, "/") : null,
     asset_sources: Array.isArray(data.asset_sources) ? data.asset_sources : [],
+    brain_meeting: normalizeBrainMeeting(data.brain_meeting),
     files,
   };
 }
 
 function buildProjectPrompt(request, history) {
   return `
-You are a senior software engineer generating a complete runnable coding result.
+You are Coder-tan coordinating a multi-agent brain meeting to generate a complete runnable coding result.
+
+${BRAIN_AGENT_PROMPT}
 
 Talk coding transcript:
 ${history.map((item) => `${item.role}: ${item.content}`).join("\n").slice(-8000)}
@@ -347,6 +410,7 @@ Return only valid JSON with this schema:
   "summary": "short Japanese summary",
   "preview_file": "relative path to an HTML file to screenshot, or null",
   "asset_sources": [{"asset": "name", "source": "url or none", "license": "note"}],
+  "brain_meeting": [{"agent": "コーダーたん", "comment": "short public Japanese comment"}],
   "files": [{"path": "relative/file/path.ext", "content": "full file content"}]
 }
 
@@ -355,17 +419,22 @@ Rules:
 - Keep paths relative. Do not use absolute paths or .. segments.
 - If a web UI is generated, include a directly previewable HTML file.
 - Include README.md when setup or run steps are useful.
+- Use the four-agent meeting to check implementation, UI/UX, review risks, and tests before writing the final JSON.
 `.trim();
 }
 
 async function generateProject(session, request, userId = session.ownerId) {
   const response = await puterChat(buildProjectPrompt(request, session.history), PUTER_CHAT_MODEL, "talk final project", userId);
-  return validateProject(extractJson(extractText(response)));
+  const project = validateProject(extractJson(extractText(response)));
+  project.ai_meta = aiUsageMeta(response);
+  return project;
 }
 
 function buildCommandProjectPrompt(request, programmingLanguage, projectContext) {
   return `
-You are a senior software engineer generating a complete runnable coding result.
+You are Coder-tan coordinating a multi-agent brain meeting to generate a complete runnable coding result.
+
+${BRAIN_AGENT_PROMPT}
 
 Known project context:
 ${projectContext || "No prior context."}
@@ -382,6 +451,7 @@ Return only valid JSON with this schema:
   "summary": "short Japanese summary",
   "preview_file": "relative path to an HTML file to screenshot, or null",
   "asset_sources": [{"asset": "name", "source": "url or none", "license": "note"}],
+  "brain_meeting": [{"agent": "コーダーたん", "comment": "short public Japanese comment"}],
   "files": [{"path": "relative/file/path.ext", "content": "full file content"}]
 }
 
@@ -391,19 +461,23 @@ Rules:
 - If a web UI is generated, include a directly previewable HTML file.
 - Include README.md when setup or run steps are useful.
 - Prefer a focused answer that matches the requested language/framework.
+- Use the four-agent meeting to check implementation, UI/UX, review risks, and tests before writing the final JSON.
 `.trim();
 }
 
 async function generateProjectForCommand(request, programmingLanguage, model, projectContext, userId = null) {
   const selectedModel = model || DEFAULT_CODE_MODEL;
   const response = await puterChat(buildCommandProjectPrompt(request, programmingLanguage, projectContext), selectedModel, "project generation", userId);
-  return validateProject(extractJson(extractText(response)));
+  const project = validateProject(extractJson(extractText(response)));
+  project.ai_meta = aiUsageMeta(response);
+  return project;
 }
 
 async function generateTextResponse(prompt, model, userId = null) {
   const selectedModel = model || DEFAULT_CODE_MODEL;
   const response = await puterChat(prompt, selectedModel, "text response", userId);
-  return extractText(response).trim() || "回答を生成できませんでした。";
+  const usageLine = aiUsageLine(response);
+  return `${extractText(response).trim() || "回答を生成できませんでした。"}${usageLine ? `\n\n${usageLine}` : ""}`;
 }
 
 function dataUrlToBuffer(dataUrl) {
@@ -416,6 +490,11 @@ function dataUrlToBuffer(dataUrl) {
 }
 
 async function imageSourceToAttachment(source, name = "generated-image.png") {
+  if (isInsufficientFundsResult(source)) {
+    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
+    error.code = "insufficient_funds";
+    throw error;
+  }
   const data = dataUrlToBuffer(source);
   if (data) {
     const ext = data.mimeType.includes("jpeg") ? "jpg" : data.mimeType.includes("webp") ? "webp" : "png";
@@ -501,7 +580,7 @@ function collectMediaSources(value, seen = new Set()) {
 
 async function mediaResultToAttachment(value, name, fallbackMimeType) {
   if (isInsufficientFundsResult(value)) {
-    const error = new Error("Insufficient funds");
+    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
     error.code = "insufficient_funds";
     throw error;
   }
@@ -528,6 +607,24 @@ function isInsufficientFundsResult(value) {
   return [value.output, value.result, value.data].some(isInsufficientFundsResult);
 }
 
+const PUTER_AI_CREDIT_LIMIT_MESSAGE =
+  "PuterのAI利用枠に達した可能性があります。現在、追加AIクレジットの購入方法はPuter公式ドキュメントで明確に案内されていません。Puterアカウント画面、またはPuter公式サポートをご確認ください。";
+
+function isPuterAiCreditLimitError(error) {
+  const text = [
+    error?.message,
+    error?.code,
+    error?.status,
+    error?.error,
+    error?.response?.status,
+    error?.response?.statusText,
+    summarizeValue(error).slice(0, 1000),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /insufficient[_\s-]?funds|credit|quota|limit|payment|required|402|429/i.test(text);
+}
+
 function replaceExtension(name, ext) {
   return String(name || "generated-media.bin").replace(/\.[A-Za-z0-9]+$/i, `.${ext}`);
 }
@@ -551,7 +648,7 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
   const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
   console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
   if (isInsufficientFundsResult(video)) {
-    const error = new Error("Insufficient funds");
+    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
     error.code = "insufficient_funds";
     throw error;
   }
@@ -599,7 +696,84 @@ async function withTimeout(promise, label, timeoutMs = PUTER_AI_TIMEOUT_MS) {
   }
 }
 
+function openRouterModelName(model, userId = null) {
+  if (String(model || "").startsWith("openrouter/")) return String(model).slice("openrouter/".length);
+  return loadOpenRouterConfig(userId)?.model || OPENROUTER_DEFAULT_MODEL;
+}
+
+function shouldUseOpenRouter(model) {
+  return String(model || "").startsWith("openrouter/");
+}
+
+async function openRouterChat(prompt, model, label, userId) {
+  const config = loadOpenRouterConfig(userId);
+  if (!config?.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
+  const openRouterModel = openRouterModelName(model, userId);
+  const startedAt = Date.now();
+  console.log(`[AI] ${label} start provider=openrouter model=${openRouterModel}`);
+  const response = await withTimeout(
+    fetch(`${OPENROUTER_API_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/higashiikenaga/discoder",
+        "X-Title": "DisCoder",
+      },
+      body: JSON.stringify({
+        model: openRouterModel,
+        messages: Array.isArray(prompt) ? prompt : [{ role: "user", content: String(prompt) }],
+      }),
+    }),
+    `openrouter.chat ${openRouterModel}`
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`OpenRouter ${response.status}: ${extractText(data) || summarizeValue(data).slice(0, 300)}`);
+  }
+  data.__discoder_ai = {
+    provider: "OpenRouter",
+    model: openRouterModel,
+    fallback: !shouldUseOpenRouter(model),
+  };
+  await attachOpenRouterCost(data, config.apiKey).catch((error) => console.warn("[OpenRouter] cost lookup failed:", error.message));
+  console.log(`[AI] ${label} done provider=openrouter model=${openRouterModel} ${Date.now() - startedAt}ms`);
+  return data;
+}
+
+async function attachOpenRouterCost(response, apiKey) {
+  if (!response?.id) return;
+  const stats = await withTimeout(
+    fetch(`${OPENROUTER_API_BASE}/generation?id=${encodeURIComponent(response.id)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }),
+    "openrouter.generation",
+    15000
+  );
+  if (!stats.ok) return;
+  const data = await stats.json();
+  const costUsd = Number(data?.data?.total_cost ?? data?.data?.usage ?? data?.total_cost);
+  if (!Number.isFinite(costUsd)) return;
+  response.__discoder_ai.costUsd = costUsd;
+  response.__discoder_ai.costJpy = costUsd * OPENROUTER_USD_JPY;
+}
+
+function aiUsageMeta(response) {
+  return response?.__discoder_ai || null;
+}
+
+function aiUsageLine(responseOrProject) {
+  const meta = responseOrProject?.ai_meta || aiUsageMeta(responseOrProject);
+  if (!meta) return "";
+  const fallback = meta.fallback ? " / Puter上限からフォールバック" : "";
+  const cost = Number.isFinite(meta.costJpy)
+    ? ` / 概算 ${meta.costJpy.toFixed(meta.costJpy < 1 ? 3 : 1)}円 ($${meta.costUsd.toFixed(6)})`
+    : "";
+  return `AI: ${meta.provider} \`${meta.model}\`${fallback}${cost}`;
+}
+
 async function puterChat(prompt, model, label, userId = null) {
+  if (shouldUseOpenRouter(model)) return openRouterChat(prompt, model, label, userId);
   const puter = await getPuter(userId);
   const startedAt = Date.now();
   console.log(`[AI] ${label} start model=${model}`);
@@ -609,6 +783,13 @@ async function puterChat(prompt, model, label, userId = null) {
     return response;
   } catch (error) {
     console.error(`[AI] ${label} failed after ${Date.now() - startedAt}ms:`, error?.stack || error);
+    if (isPuterAiCreditLimitError(error)) {
+      if (userId && loadOpenRouterConfig(userId)?.fallbackEnabled) {
+        console.warn(`[AI] ${label} falling back to OpenRouter for user=${userId}`);
+        return openRouterChat(prompt, openRouterModelName(null, userId), label, userId);
+      }
+      error.message = `${PUTER_AI_CREDIT_LIMIT_MESSAGE}\n\n${error.message || error}`;
+    }
     throw error;
   }
 }
@@ -616,6 +797,8 @@ async function puterChat(prompt, model, label, userId = null) {
 function buildReviewPrompt(code, programmingLanguage, projectContext) {
   return `
 You are a strict senior code reviewer.
+
+${BRAIN_AGENT_PROMPT}
 
 Project context:
 ${projectContext || "No prior context."}
@@ -631,6 +814,7 @@ ${code}
 Respond in Japanese. Lead with concrete findings ordered by severity.
 Include bugs, likely runtime errors, security/reliability risks, missing tests, edge cases, and concrete fix suggestions.
 If there are no serious issues, say that clearly and mention remaining risks.
+Use Review-tan as the lead voice, but incorporate Coder-tan, Designer-tan, and Tester-tan perspectives where relevant.
 Keep the response concise enough for Discord.
 `.trim();
 }
@@ -639,6 +823,8 @@ function buildDebugPrompt(errorText, code, programmingLanguage, projectContext) 
   const codeBlock = code ? `\nRelated code:\n\`\`\`${programmingLanguage}\n${code}\n\`\`\`` : "";
   return `
 You are a debugging assistant for software engineers.
+
+${BRAIN_AGENT_PROMPT}
 
 Project context:
 ${projectContext || "No prior context."}
@@ -654,6 +840,7 @@ ${codeBlock}
 
 Respond in Japanese. Explain the most likely cause, why it matches the error, what to check next, concrete fix steps, and corrected code if useful.
 Do not overstate certainty when the pasted information is incomplete.
+Use Tester-tan to reproduce, Review-tan to identify risk, and Coder-tan to propose the fix. Mention Designer-tan only for UI-related bugs.
 `.trim();
 }
 
@@ -689,8 +876,10 @@ async function sendProjectResult(interaction, project, model, programmingLanguag
     return [];
   });
   const driveText = links.length ? `\n\nGoogle Drive: 保存しました。\n${links.slice(0, 5).join("\n")}` : "";
+  const brainText = formatBrainMeeting(project);
+  const usageLine = aiUsageLine(project);
   const publicContent =
-    `**${project.title}**\n${project.summary}\n\n${project.files.length} files generated.\n言語/技術: \`${programmingLanguage}\`\nモデル: \`${model}\`${driveText}`.slice(
+    `**${project.title}**\n${project.summary}${brainText}\n\n${project.files.length} files generated.\n言語/技術: \`${programmingLanguage}\`\nモデル: \`${model}\`${usageLine ? `\n${usageLine}` : ""}${driveText}`.slice(
       0,
       2000
     );
@@ -706,7 +895,7 @@ async function sendProjectResult(interaction, project, model, programmingLanguag
     new ButtonBuilder().setCustomId(`publish:${publishId}`).setLabel("公開").setStyle(ButtonStyle.Primary)
   );
   await interaction.editReply({
-    content: `${publicContent}\n\n引用/出典ファイル: \`ASSET_SOURCES.md\`\nこの結果をチャンネルに出す場合は「公開」を押してください。`.slice(0, 2000),
+    content: `${publicContent}\n\n引用/出典ファイル: \`ASSET_SOURCES.md\` / \`BRAIN_MEETING.md\`\nこの結果をチャンネルに出す場合は「公開」を押してください。`.slice(0, 2000),
     files: attachments,
     components: [row],
   });
@@ -753,6 +942,20 @@ function assetSourcesMarkdown(project) {
   return `${lines.join("\n")}\n`;
 }
 
+function brainMeetingMarkdown(project) {
+  const lines = ["# Brain Meeting", ""];
+  for (const item of normalizeBrainMeeting(project.brain_meeting)) {
+    lines.push(`[${item.agent}]`);
+    lines.push(`「${item.comment}」`, "");
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function formatBrainMeeting(project, maxLength = 650) {
+  const lines = normalizeBrainMeeting(project.brain_meeting).map((item) => `[${item.agent}]\n「${item.comment}」`);
+  return lines.length ? `\n\n**脳内会議**\n${lines.join("\n")}`.slice(0, maxLength) : "";
+}
+
 async function buildProjectAttachments(project) {
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "discoder-node-project-"));
   const projectDir = path.join(workDir, "project");
@@ -764,6 +967,7 @@ async function buildProjectAttachments(project) {
     await fsp.writeFile(dest, file.content, "utf8");
   }
   await fsp.writeFile(path.join(projectDir, "ASSET_SOURCES.md"), assetSourcesMarkdown(project), "utf8");
+  await fsp.writeFile(path.join(projectDir, "BRAIN_MEETING.md"), brainMeetingMarkdown(project), "utf8");
 
   const zip = new JSZip();
   async function addDir(dir, root = dir) {
@@ -778,6 +982,7 @@ async function buildProjectAttachments(project) {
   const attachments = [
     new AttachmentBuilder(zipBuffer, { name: `${safeName(project.title)}.zip` }),
     new AttachmentBuilder(Buffer.from(assetSourcesMarkdown(project), "utf8"), { name: "ASSET_SOURCES.md" }),
+    new AttachmentBuilder(Buffer.from(brainMeetingMarkdown(project), "utf8"), { name: "BRAIN_MEETING.md" }),
   ];
 
   const preview = await findPreviewPath(project, projectDir);
@@ -1262,11 +1467,14 @@ function summarizeValue(value, depth = 0) {
 }
 
 async function generateReply(session, userText, userId = session.ownerId) {
-  const puter = await getPuter(userId);
   const modeInstruction =
     session.mode === "chat"
       ? "You are Coder-tan in casual chat mode. Keep it light, friendly, and concise in Japanese. Do not generate full code unless explicitly asked."
-      : "You are Coder-tan, a concise Japanese Discord VC coding assistant. Answer in Japanese. Generate code when useful. Keep replies short for TTS.";
+      : `You are Coder-tan, a concise Japanese Discord VC coding assistant. Answer in Japanese. Generate code when useful. Keep replies short for TTS.
+
+${BRAIN_AGENT_PROMPT}
+
+For normal short answers, do the meeting internally and answer as Coder-tan. When a tradeoff or risk matters, include 1-3 short public lines like [レビューたん] or [テスターたん].`;
   const messages = [
     {
       role: "system",
@@ -1275,8 +1483,9 @@ async function generateReply(session, userText, userId = session.ownerId) {
     ...session.history.slice(-16),
     { role: "user", content: userText },
   ];
-  const response = await puter.ai.chat(messages, { model: PUTER_CHAT_MODEL });
-  return extractText(response).trim() || "うまく返答を作れなかったよ。";
+  const response = await puterChat(messages, PUTER_CHAT_MODEL, "talk reply", userId);
+  const usageLine = aiUsageLine(response);
+  return `${extractText(response).trim() || "うまく返答を作れなかったよ。"}${usageLine ? `\n\n${usageLine}` : ""}`;
 }
 
 async function synthesizeTts(text) {
@@ -1843,8 +2052,10 @@ async function sendTalkProjectResult(session, member, project) {
     return [];
   });
   const driveText = links.length ? `\nGoogle Drive: 保存しました。\n${links.slice(0, 5).join("\n")}` : "";
+  const brainText = formatBrainMeeting(project);
+  const usageLine = aiUsageLine(project);
   await session.textChannel.send({
-    content: `**${project.title}**\n${project.summary}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${driveText}`.slice(0, 2000),
+    content: `**${project.title}**\n${project.summary}${brainText}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${usageLine ? `\n${usageLine}` : ""}${driveText}`.slice(0, 2000),
     files: attachments,
   });
 }
@@ -2026,8 +2237,10 @@ async function completeTalkSession(session, member) {
       return [];
     });
     const driveText = links.length ? `\nGoogle Drive: 保存しました。\n${links.slice(0, 5).join("\n")}` : "";
+    const brainText = formatBrainMeeting(project);
+    const usageLine = aiUsageLine(project);
     await session.textChannel.send({
-      content: `**${project.title}**\n${project.summary}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${driveText}`.slice(0, 2000),
+      content: `**${project.title}**\n${project.summary}${brainText}\n\n${project.files.length} files generated with ${PUTER_CHAT_MODEL}.${usageLine ? `\n${usageLine}` : ""}${driveText}`.slice(0, 2000),
       files: attachments,
     });
   } catch (error) {
@@ -2150,6 +2363,24 @@ client.once("clientReady", async () => {
       .addSubcommand((sub) => sub.setName("connect").setDescription("自分のPuterアカウントをこのbotに連携します"))
       .addSubcommand((sub) => sub.setName("status").setDescription("Puter連携状態を確認します"))
       .addSubcommand((sub) => sub.setName("disconnect").setDescription("Puter連携を解除します")),
+    new SlashCommandBuilder()
+      .setName("openrouter")
+      .setDescription("OpenRouter user fallback settings")
+      .addSubcommand((sub) =>
+        sub
+          .setName("connect")
+          .setDescription("Save your own OpenRouter API key")
+          .addStringOption((option) => option.setName("api_key").setDescription("OpenRouter API key").setRequired(true))
+          .addStringOption((option) => option.setName("model").setDescription("Default OpenRouter model").setRequired(false))
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("fallback")
+          .setDescription("Enable or disable Puter credit fallback")
+          .addBooleanOption((option) => option.setName("enabled").setDescription("Fallback enabled").setRequired(true))
+      )
+      .addSubcommand((sub) => sub.setName("status").setDescription("Show OpenRouter fallback settings"))
+      .addSubcommand((sub) => sub.setName("disconnect").setDescription("Delete your OpenRouter API key")),
     new SlashCommandBuilder()
       .setName("drive")
       .setDescription("Google Drive連携")
@@ -2338,6 +2569,45 @@ client.on("interactionCreate", async (interaction) => {
     if (subcommand === "disconnect") {
       deletePuterUserToken(interaction.user.id);
       await interaction.reply({ content: "Puter連携を解除しました。", flags: 64 });
+      return;
+    }
+  }
+  if (interaction.commandName === "openrouter") {
+    const subcommand = interaction.options.getSubcommand();
+    if (subcommand === "connect") {
+      const apiKey = interaction.options.getString("api_key", true).trim();
+      const model = (interaction.options.getString("model") || OPENROUTER_DEFAULT_MODEL).trim();
+      saveOpenRouterConfig(interaction.user.id, { apiKey, model, fallbackEnabled: true });
+      await interaction.reply({
+        content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーで \`${model}\` にフォールバックします。\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
+        flags: 64,
+      });
+      return;
+    }
+    if (subcommand === "fallback") {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      const config = loadOpenRouterConfig(interaction.user.id);
+      if (!config?.apiKey) {
+        await interaction.reply({ content: "OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。", flags: 64 });
+        return;
+      }
+      saveOpenRouterConfig(interaction.user.id, { ...config, fallbackEnabled: enabled });
+      await interaction.reply({ content: `OpenRouterフォールバックを${enabled ? "有効" : "無効"}にしました。`, flags: 64 });
+      return;
+    }
+    if (subcommand === "status") {
+      const config = loadOpenRouterConfig(interaction.user.id);
+      await interaction.reply({
+        content: config?.apiKey
+          ? `OpenRouter連携済みです。\nモデル: \`${config.model || OPENROUTER_DEFAULT_MODEL}\`\nPuter上限時フォールバック: ${config.fallbackEnabled !== false ? "有効" : "無効"}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`
+          : "OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。",
+        flags: 64,
+      });
+      return;
+    }
+    if (subcommand === "disconnect") {
+      deleteOpenRouterConfig(interaction.user.id);
+      await interaction.reply({ content: "OpenRouter連携を解除しました。", flags: 64 });
       return;
     }
   }

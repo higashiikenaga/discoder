@@ -592,7 +592,7 @@ function dataUrlToBuffer(dataUrl) {
 
 async function imageSourceToAttachment(source, name = "generated-image.png") {
   if (isInsufficientFundsResult(source)) {
-    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
+    const error = new Error(puterAiCreditLimitMessage());
     error.code = "insufficient_funds";
     throw error;
   }
@@ -690,7 +690,7 @@ function collectMediaSources(value, seen = new Set()) {
 
 async function mediaResultToAttachment(value, name, fallbackMimeType) {
   if (isInsufficientFundsResult(value)) {
-    const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
+    const error = new Error(puterAiCreditLimitMessage());
     error.code = "insufficient_funds";
     throw error;
   }
@@ -719,6 +719,10 @@ function isInsufficientFundsResult(value) {
 
 const PUTER_AI_CREDIT_LIMIT_MESSAGE =
   "PuterのAI利用枠に達した可能性があります。現在、追加AIクレジットの購入方法はPuter公式ドキュメントで明確に案内されていません。Puterアカウント画面、またはPuter公式サポートをご確認ください。";
+
+function puterAiCreditLimitMessage() {
+  return "PuterのAI利用枠に達した可能性があります。現在、追加AIクレジットの購入方法はPuter公式ドキュメントで明確に案内されていません。続行するには `/openrouter connect` で自分のOpenRouter APIキーを連携してください。Puter側はPuterアカウント画面、またはPuter公式サポートをご確認ください。";
+}
 
 function isPuterAiCreditLimitError(error) {
   const text = [
@@ -760,7 +764,7 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
     const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
     console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
     if (isInsufficientFundsResult(video)) {
-      const error = new Error(PUTER_AI_CREDIT_LIMIT_MESSAGE);
+      const error = new Error(puterAiCreditLimitMessage());
       error.code = "insufficient_funds";
       throw error;
     }
@@ -1059,7 +1063,7 @@ async function puterChat(prompt, model, label, userId = null) {
         console.warn(`[AI] ${label} falling back to OpenRouter for user=${userId}`);
         return openRouterChat(prompt, openRouterModelName(null, userId), label, userId);
       }
-      error.message = `${PUTER_AI_CREDIT_LIMIT_MESSAGE}\n\n${error.message || error}`;
+      error.message = `${puterAiCreditLimitMessage()}\n\n${error.message || error}`;
     }
     throw error;
   }
@@ -2828,13 +2832,14 @@ client.on("interactionCreate", async (interaction) => {
   }
   if (interaction.commandName === "video") {
     const prompt = interaction.options.getString("prompt", true);
-    await interaction.reply(`動画生成リクエストを受け付けました。生成中...\n${sora2MigrationNotice()}`);
+    await interaction.deferReply();
+    await interaction.editReply(`\u52d5\u753b\u751f\u6210\u30ea\u30af\u30a8\u30b9\u30c8\u3092\u53d7\u3051\u4ed8\u3051\u307e\u3057\u305f\u3002\u751f\u6210\u4e2d...\n${sora2MigrationNotice()}`);
     try {
       await sendDirectVideoResultForUser(interaction.channel, prompt, interaction.user.id);
-      await interaction.editReply("動画生成が完了しました。結果はこのチャンネルに投稿しました。");
+      await interaction.editReply("\u52d5\u753b\u751f\u6210\u304c\u5b8c\u4e86\u3057\u307e\u3057\u305f\u3002\u7d50\u679c\u306f\u3053\u306e\u30c1\u30e3\u30f3\u30cd\u30eb\u306b\u6295\u7a3f\u3057\u307e\u3057\u305f\u3002");
     } catch (error) {
       console.error("[slash video] failed:", error?.stack || error);
-      await interaction.editReply(`動画生成に失敗しました: \`${error.message || error}\``);
+      await interaction.editReply(`\u52d5\u753b\u751f\u6210\u306b\u5931\u6557\u3057\u307e\u3057\u305f: \`${error.message || error}\``);
     }
     return;
   }

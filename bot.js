@@ -78,6 +78,7 @@ const OPENROUTER_DEFAULT_MODEL = process.env.OPENROUTER_DEFAULT_MODEL || "openai
 const OPENROUTER_IMAGE_MODEL = process.env.OPENROUTER_IMAGE_MODEL || "openai/gpt-5-image-mini";
 const OPENROUTER_VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "openai/gpt-4o-mini";
 const OPENROUTER_VIDEO_MODEL = process.env.OPENROUTER_VIDEO_MODEL || "bytedance/seedance-2.0-fast";
+const OPENROUTER_VIDEO_SIZE = process.env.OPENROUTER_VIDEO_SIZE || "1280x720";
 const OPENROUTER_USD_JPY = Number(process.env.OPENROUTER_USD_JPY || 155);
 const STT_LANGUAGE = process.env.TALK_CODING_STT_LANGUAGE_CODE || "ja";
 const DEBUG_STT = isTruthy(process.env.TALK_CODING_DEBUG_STT);
@@ -300,6 +301,7 @@ function saveOpenRouterConfig(userId, config) {
     imageModel: config.imageModel || OPENROUTER_IMAGE_MODEL,
     visionModel: config.visionModel || OPENROUTER_VISION_MODEL,
     videoModel: config.videoModel || OPENROUTER_VIDEO_MODEL,
+    videoSize: normalizeVideoSize(config.videoSize || OPENROUTER_VIDEO_SIZE).size,
     imageProvider: config.imageProvider || "auto",
     visionProvider: config.visionProvider || "auto",
     videoProvider: config.videoProvider || "auto",
@@ -325,6 +327,7 @@ function openRouterMediaConfig(userId) {
     imageModel: config.imageModel || OPENROUTER_IMAGE_MODEL,
     visionModel: config.visionModel || OPENROUTER_VISION_MODEL,
     videoModel: config.videoModel || OPENROUTER_VIDEO_MODEL,
+    videoSize: normalizeVideoSize(config.videoSize || OPENROUTER_VIDEO_SIZE).size,
     imageProvider: config.imageProvider || "auto",
     visionProvider: config.visionProvider || "auto",
     videoProvider: config.videoProvider || "auto",
@@ -346,6 +349,43 @@ function shouldFallbackToOpenRouterMedia(error, userId, kind) {
   const config = openRouterMediaConfig(userId);
   const provider = config[`${kind}Provider`] || "auto";
   return Boolean(config.apiKey && config.fallbackEnabled && provider !== "puter" && isPuterAiCreditLimitError(error));
+}
+
+function normalizeVideoSize(value = OPENROUTER_VIDEO_SIZE) {
+  const raw = String(value || OPENROUTER_VIDEO_SIZE).trim().toLowerCase().replace(/\s+/g, "");
+  const aliases = {
+    low: OPENROUTER_VIDEO_SIZE,
+    hd: "1280x720",
+    "720p": "1280x720",
+    fullhd: "1920x1080",
+    fhd: "1920x1080",
+    "1080p": "1920x1080",
+    portrait720: "720x1280",
+    vertical720: "720x1280",
+    portrait1080: "1080x1920",
+    vertical1080: "1080x1920",
+  };
+  const normalized = aliases[raw] || raw;
+  const match = normalized.match(/^(\d{3,4})x(\d{3,4})$/);
+  if (!match) return value === "1280x720" ? { size: "1280x720", width: 1280, height: 720, resolution: "720p", aspectRatio: "16:9" } : normalizeVideoSize("1280x720");
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  const resolution = Math.max(width, height) >= 1900 ? "1080p" : Math.max(width, height) >= 1280 ? "720p" : "480p";
+  const aspectRatio = aspectRatioForSize(width, height);
+  return { size: `${width}x${height}`, width, height, resolution, aspectRatio };
+}
+
+function aspectRatioForSize(width, height) {
+  const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+  const divisor = gcd(width, height);
+  const ratio = `${width / divisor}:${height / divisor}`;
+  const common = new Set(["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "9:21"]);
+  return common.has(ratio) ? ratio : width >= height ? "16:9" : "9:16";
+}
+
+function extractVideoSize(text, fallback = OPENROUTER_VIDEO_SIZE) {
+  const match = String(text || "").match(/\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b/i);
+  return normalizeVideoSize(match ? `${match[1]}x${match[2]}` : fallback);
 }
 
 function deletePuterUserToken(userId) {
@@ -710,8 +750,8 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null) {
-  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId);
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null) {
+  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, false, requestedSize);
   const model = preferredModel;
   try {
     const puter = await getPuter(userId);
@@ -729,7 +769,7 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
       model,
     };
   } catch (error) {
-    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true);
+    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true, requestedSize);
     throw error;
   }
 }
@@ -903,10 +943,11 @@ async function extractTextFromImageSourceWithOpenRouter(source, userId, fallback
   return `${extractText(response).trim()}${usageLine ? `\n\n${usageLine}` : ""}`.trim();
 }
 
-async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false) {
+async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null) {
   const config = openRouterMediaConfig(userId);
   if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
   const model = config.videoModel;
+  const videoSize = normalizeVideoSize(requestedSize || config.videoSize);
   const createResponse = await withTimeout(
     fetch(`${OPENROUTER_API_BASE}/videos`, {
       method: "POST",
@@ -920,8 +961,9 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
         model,
         prompt: String(prompt),
         duration: 5,
-        resolution: "720p",
-        aspect_ratio: "16:9",
+        resolution: videoSize.resolution,
+        aspect_ratio: videoSize.aspectRatio,
+        size: videoSize.size,
       }),
     }),
     `openrouter.video.create ${model}`,
@@ -947,8 +989,9 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
     attachment,
     model,
     provider: "OpenRouter",
+    size: videoSize.size,
     fallbackFrom: fallback ? "puter" : null,
-    ai_meta: openRouterVideoUsageMeta(job, model, fallback),
+    ai_meta: openRouterVideoUsageMeta(job, model, fallback, videoSize.size),
   };
 }
 
@@ -969,15 +1012,20 @@ async function pollOpenRouterVideoJob(jobId, apiKey) {
   throw new Error(`OpenRouter video timed out: ${summarizeValue(last).slice(0, 300)}`);
 }
 
-function openRouterVideoUsageMeta(job, model, fallback) {
+function openRouterVideoUsageMeta(job, model, fallback, size = null) {
   const costUsd = Number(job?.data?.total_cost ?? job?.total_cost ?? job?.data?.cost ?? job?.cost);
   return {
     provider: "OpenRouter",
     model,
     fallback,
+    size,
     costUsd: Number.isFinite(costUsd) ? costUsd : undefined,
     costJpy: Number.isFinite(costUsd) ? costUsd * OPENROUTER_USD_JPY : undefined,
   };
+}
+
+function videoSizeLabel(result) {
+  return result?.size ? `\nSize: \`${result.size}\`` : "";
 }
 
 function aiUsageMeta(response) {
@@ -988,10 +1036,11 @@ function aiUsageLine(responseOrProject) {
   const meta = responseOrProject?.ai_meta || aiUsageMeta(responseOrProject);
   if (!meta) return "";
   const fallback = meta.fallback ? " / Puter上限からフォールバック" : "";
+  const size = meta.size ? ` / ${meta.size}` : "";
   const cost = Number.isFinite(meta.costJpy)
     ? ` / 概算 ${meta.costJpy.toFixed(meta.costJpy < 1 ? 3 : 1)}円 ($${meta.costUsd.toFixed(6)})`
     : "";
-  return `AI: ${meta.provider} \`${meta.model}\`${fallback}${cost}`;
+  return `AI: ${meta.provider} \`${meta.model}\`${fallback}${size}${cost}`;
 }
 
 async function puterChat(prompt, model, label, userId = null) {
@@ -2301,6 +2350,7 @@ async function sendTalkImageResult(session, text, userId = null) {
 async function sendTalkVideoResult(session, text, userId = null) {
   const prompt = extractVideoPrompt(text) || text;
   const model = puterVideoModelForDate();
+  const requestedSize = extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
   const notice = sora2MigrationNotice();
   console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} model=${model}`);
   const loading = await sendLoadingMessage(
@@ -2313,7 +2363,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
     let result;
     let usageLine = "";
     try {
-      result = await generateVideoAttachment(prompt, model, userId);
+      result = await generateVideoAttachment(prompt, model, userId, requestedSize.size);
       usageLine = aiUsageLine(result);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
@@ -2321,7 +2371,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(prompt, fallbackModel, userId);
+        result = await generateVideoAttachment(prompt, fallbackModel, userId, requestedSize.size);
         usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
@@ -2603,6 +2653,7 @@ client.once("clientReady", async () => {
           .addStringOption((option) => option.setName("image_model").setDescription("Default OpenRouter image model").setRequired(false))
           .addStringOption((option) => option.setName("vision_model").setDescription("Default OpenRouter vision/OCR model").setRequired(false))
           .addStringOption((option) => option.setName("video_model").setDescription("Default OpenRouter video model").setRequired(false))
+          .addStringOption((option) => option.setName("video_size").setDescription("Default video size, e.g. 1280x720 or 720x1280").setRequired(false))
       )
       .addSubcommand((sub) =>
         sub
@@ -2617,6 +2668,7 @@ client.once("clientReady", async () => {
           )
           .addStringOption((option) => option.setName("provider").setDescription("Provider route").setRequired(true).addChoices(...MEDIA_PROVIDER_CHOICES))
           .addStringOption((option) => option.setName("model").setDescription("OpenRouter model for this media kind").setRequired(false))
+          .addStringOption((option) => option.setName("size").setDescription("Video size, e.g. 1280x720, 1920x1080, 720x1280").setRequired(false))
       )
       .addSubcommand((sub) =>
         sub
@@ -2825,7 +2877,8 @@ client.on("interactionCreate", async (interaction) => {
       const imageModel = (interaction.options.getString("image_model") || OPENROUTER_IMAGE_MODEL).trim();
       const visionModel = (interaction.options.getString("vision_model") || OPENROUTER_VISION_MODEL).trim();
       const videoModel = (interaction.options.getString("video_model") || OPENROUTER_VIDEO_MODEL).trim();
-      saveOpenRouterConfig(interaction.user.id, { apiKey, model, imageModel, visionModel, videoModel, fallbackEnabled: true });
+      const videoSize = normalizeVideoSize(interaction.options.getString("video_size") || OPENROUTER_VIDEO_SIZE).size;
+      saveOpenRouterConfig(interaction.user.id, { apiKey, model, imageModel, visionModel, videoModel, videoSize, fallbackEnabled: true });
       await interaction.reply({
         content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーへフォールバックします。\nText: \`${model}\`\nImage: \`${imageModel}\`\nVision: \`${visionModel}\`\nVideo: \`${videoModel}\`\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
         flags: 64,
@@ -2841,9 +2894,11 @@ client.on("interactionCreate", async (interaction) => {
       const kind = interaction.options.getString("kind", true);
       const provider = interaction.options.getString("provider", true);
       const model = interaction.options.getString("model");
+      const size = interaction.options.getString("size");
       const next = { ...openRouterMediaConfig(interaction.user.id), apiKey: config.apiKey };
       next[`${kind}Provider`] = provider;
       if (model) next[`${kind}Model`] = model.trim();
+      if (kind === "video" && size) next.videoSize = normalizeVideoSize(size).size;
       saveOpenRouterConfig(interaction.user.id, next);
       await interaction.reply({
         content: `${kind} の経路を \`${provider}\` にしました。${next[`${kind}Model`] ? `OpenRouter model: \`${next[`${kind}Model`]}\`` : ""}`,

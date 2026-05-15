@@ -136,13 +136,11 @@ const OPENROUTER_VISION_MODEL_CHOICES = [
   "anthropic/claude-3.5-sonnet",
 ];
 const VIDEO_QUALITY_SIZES = {
-  "144p": { width: 256, height: 144 },
-  "240p": { width: 426, height: 240 },
-  "360p": { width: 640, height: 360 },
   "480p": { width: 854, height: 480 },
   "720p": { width: 1280, height: 720 },
+  "1080p": { width: 1920, height: 1080 },
 };
-const DEFAULT_VIDEO_QUALITY = "360p";
+const DEFAULT_VIDEO_QUALITY = "480p";
 const DEFAULT_VIDEO_DURATION_SECONDS = 3;
 const MAX_VIDEO_DURATION_SECONDS = 5;
 const LANGUAGE_CHOICES = [
@@ -2958,11 +2956,13 @@ client.on("interactionCreate", async (interaction) => {
       );
       await interaction.reply({
         content:
-          `⚠️ 動画生成は高コストです。高画質・長時間ほどOpenRouter APIキーの利用料金が増えます。\n` +
+          "\u26a0\ufe0f \u52d5\u753b\u751f\u6210\u306f\u9ad8\u30b3\u30b9\u30c8\u3067\u3059\u3002\n" +
+          "OpenRouter\u3067\u306f480p\u4ee5\u4e0a\u304c\u6700\u4f4e\u89e3\u50cf\u5ea6\u3067\u3059\u3002\n" +
+          "\u9ad8\u753b\u8cea\u30fb\u9577\u6642\u9593\u307b\u3069\u6599\u91d1\u304c\u5927\u304d\u304f\u5897\u3048\u307e\u3059\u3002\n" +
           `quality: ${size.quality}\n` +
           `size: ${size.size}\n` +
           `duration: ${duration}s\n` +
-          "続行しますか？",
+          "\u7d9a\u884c\u3057\u307e\u3059\u304b\uff1f",
         components: [row],
         flags: 64,
       });

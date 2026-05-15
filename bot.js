@@ -103,6 +103,7 @@ const PUTER_AUTH_STATES = new Map();
 let driveOAuthServerStarted = false;
 const commandMemory = new Map();
 const publishResults = new Map();
+const pendingVideoRequests = new Map();
 const MODEL_CHOICES = [
   "gemini-3-flash-preview",
   "gemini-2.5-flash-lite",
@@ -134,6 +135,16 @@ const OPENROUTER_VISION_MODEL_CHOICES = [
   "google/gemini-2.5-flash",
   "anthropic/claude-3.5-sonnet",
 ];
+const VIDEO_QUALITY_SIZES = {
+  "144p": { width: 256, height: 144 },
+  "240p": { width: 426, height: 240 },
+  "360p": { width: 640, height: 360 },
+  "480p": { width: 854, height: 480 },
+  "720p": { width: 1280, height: 720 },
+};
+const DEFAULT_VIDEO_QUALITY = "360p";
+const DEFAULT_VIDEO_DURATION_SECONDS = 3;
+const MAX_VIDEO_DURATION_SECONDS = 5;
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
   "Python",
@@ -386,6 +397,27 @@ function aspectRatioForSize(width, height) {
 function extractVideoSize(text, fallback = OPENROUTER_VIDEO_SIZE) {
   const match = String(text || "").match(/\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b/i);
   return normalizeVideoSize(match ? `${match[1]}x${match[2]}` : fallback);
+}
+
+function videoQualityToSize(quality = DEFAULT_VIDEO_QUALITY) {
+  const normalized = String(quality || DEFAULT_VIDEO_QUALITY).toLowerCase();
+  const size = VIDEO_QUALITY_SIZES[normalized];
+  if (!size) throw new Error(`不正なqualityです: ${quality}`);
+  return { quality: normalized, ...size, size: `${size.width}x${size.height}` };
+}
+
+function normalizeVideoDurationSeconds(value = DEFAULT_VIDEO_DURATION_SECONDS) {
+  const duration = Number(value || DEFAULT_VIDEO_DURATION_SECONDS);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error("durationは1秒以上で指定してください。");
+  if (duration > MAX_VIDEO_DURATION_SECONDS) throw new Error(`durationは最大${MAX_VIDEO_DURATION_SECONDS}秒までです。`);
+  return Math.ceil(duration);
+}
+
+function cleanupPendingVideoRequests() {
+  const now = Date.now();
+  for (const [id, request] of pendingVideoRequests) {
+    if (request.expiresAt <= now) pendingVideoRequests.delete(id);
+  }
 }
 
 function deletePuterUserToken(userId) {
@@ -754,8 +786,8 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null) {
-  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, false, requestedSize);
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null, requestedDuration = DEFAULT_VIDEO_DURATION_SECONDS) {
+  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, false, requestedSize, requestedDuration);
   const model = preferredModel;
   try {
     const puter = await getPuter(userId);
@@ -773,7 +805,7 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
       model,
     };
   } catch (error) {
-    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true, requestedSize);
+    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true, requestedSize, requestedDuration);
     throw error;
   }
 }
@@ -947,11 +979,12 @@ async function extractTextFromImageSourceWithOpenRouter(source, userId, fallback
   return `${extractText(response).trim()}${usageLine ? `\n\n${usageLine}` : ""}`.trim();
 }
 
-async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null) {
+async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = DEFAULT_VIDEO_DURATION_SECONDS) {
   const config = openRouterMediaConfig(userId);
   if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
   const model = config.videoModel;
   const videoSize = normalizeVideoSize(requestedSize || config.videoSize);
+  const duration = normalizeVideoDurationSeconds(requestedDuration);
   const createResponse = await withTimeout(
     fetch(`${OPENROUTER_API_BASE}/videos`, {
       method: "POST",
@@ -964,10 +997,12 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
       body: JSON.stringify({
         model,
         prompt: String(prompt),
-        duration: 5,
+        duration,
         resolution: videoSize.resolution,
         aspect_ratio: videoSize.aspectRatio,
         size: videoSize.size,
+        width: videoSize.width,
+        height: videoSize.height,
       }),
     }),
     `openrouter.video.create ${model}`,
@@ -994,8 +1029,9 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
     model,
     provider: "OpenRouter",
     size: videoSize.size,
+    duration,
     fallbackFrom: fallback ? "puter" : null,
-    ai_meta: openRouterVideoUsageMeta(job, model, fallback, videoSize.size),
+    ai_meta: openRouterVideoUsageMeta(job, model, fallback, videoSize.size, duration),
   };
 }
 
@@ -1016,13 +1052,14 @@ async function pollOpenRouterVideoJob(jobId, apiKey) {
   throw new Error(`OpenRouter video timed out: ${summarizeValue(last).slice(0, 300)}`);
 }
 
-function openRouterVideoUsageMeta(job, model, fallback, size = null) {
+function openRouterVideoUsageMeta(job, model, fallback, size = null, duration = null) {
   const costUsd = Number(job?.data?.total_cost ?? job?.total_cost ?? job?.data?.cost ?? job?.cost);
   return {
     provider: "OpenRouter",
     model,
     fallback,
     size,
+    duration,
     costUsd: Number.isFinite(costUsd) ? costUsd : undefined,
     costJpy: Number.isFinite(costUsd) ? costUsd * OPENROUTER_USD_JPY : undefined,
   };
@@ -1041,10 +1078,11 @@ function aiUsageLine(responseOrProject) {
   if (!meta) return "";
   const fallback = meta.fallback ? " / Puter上限からフォールバック" : "";
   const size = meta.size ? ` / ${meta.size}` : "";
+  const duration = meta.duration ? ` / ${meta.duration}s` : "";
   const cost = Number.isFinite(meta.costJpy)
     ? ` / 概算 ${meta.costJpy.toFixed(meta.costJpy < 1 ? 3 : 1)}円 ($${meta.costUsd.toFixed(6)})`
     : "";
-  return `AI: ${meta.provider} \`${meta.model}\`${fallback}${size}${cost}`;
+  return `AI: ${meta.provider} \`${meta.model}\`${fallback}${size}${duration}${cost}`;
 }
 
 async function puterChat(prompt, model, label, userId = null) {
@@ -2351,10 +2389,11 @@ async function sendTalkImageResult(session, text, userId = null) {
   }
 }
 
-async function sendTalkVideoResult(session, text, userId = null) {
+async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   const prompt = extractVideoPrompt(text) || text;
   const model = puterVideoModelForDate();
-  const requestedSize = extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
+  const requestedSize = options.size ? normalizeVideoSize(options.size) : extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
+  const requestedDuration = normalizeVideoDurationSeconds(options.duration || DEFAULT_VIDEO_DURATION_SECONDS);
   const notice = sora2MigrationNotice();
   console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} model=${model}`);
   const loading = await sendLoadingMessage(
@@ -2367,7 +2406,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
     let result;
     let usageLine = "";
     try {
-      result = await generateVideoAttachment(prompt, model, userId, requestedSize.size);
+      result = await generateVideoAttachment(prompt, model, userId, requestedSize.size, requestedDuration);
       usageLine = aiUsageLine(result);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
@@ -2375,7 +2414,7 @@ async function sendTalkVideoResult(session, text, userId = null) {
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(prompt, fallbackModel, userId, requestedSize.size);
+        result = await generateVideoAttachment(prompt, fallbackModel, userId, requestedSize.size, requestedDuration);
         usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
@@ -2403,6 +2442,10 @@ async function sendDirectVideoResult(channel, text) {
 
 async function sendDirectVideoResultForUser(channel, text, userId) {
   await sendTalkVideoResult({ textChannel: channel }, text, userId);
+}
+
+async function sendDirectVideoResultForUserWithOptions(channel, text, userId, options = {}) {
+  await sendTalkVideoResult({ textChannel: channel }, text, userId, options);
 }
 
 async function sendTalkImageTextResult(session, text, attachments, userId = null) {
@@ -2637,8 +2680,23 @@ client.once("clientReady", async () => {
       ),
     new SlashCommandBuilder()
       .setName("video")
-      .setDescription("Puter txt2vidで動画を生成します")
-      .addStringOption((option) => option.setName("prompt").setDescription("作りたい動画の内容").setRequired(true)),
+      .setDescription("Generate a video")
+      .addStringOption((option) => option.setName("prompt").setDescription("Video prompt").setRequired(true))
+      .addStringOption((option) =>
+        option
+          .setName("quality")
+          .setDescription("Video quality")
+          .setRequired(false)
+          .addChoices(...Object.keys(VIDEO_QUALITY_SIZES).map((value) => ({ name: value, value })))
+      )
+      .addIntegerOption((option) =>
+        option
+          .setName("duration")
+          .setDescription("Video duration seconds, max 5")
+          .setRequired(false)
+          .setMinValue(1)
+          .setMaxValue(MAX_VIDEO_DURATION_SECONDS)
+      ),
     new SlashCommandBuilder()
       .setName("puter")
       .setDescription("Puterユーザー連携")
@@ -2702,6 +2760,41 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isButton()) {
     cleanupPublishResults();
+    cleanupPendingVideoRequests();
+    if (interaction.customId.startsWith("video:")) {
+      const [, action, requestId] = interaction.customId.split(":");
+      const request = pendingVideoRequests.get(requestId);
+      if (!request) {
+        await interaction.reply({ content: "動画生成リクエストが見つからないか期限切れです。", flags: 64 });
+        return;
+      }
+      if (request.userId !== interaction.user.id) {
+        await interaction.reply({ content: "この動画生成を実行できるのは、コマンドを実行した本人だけです。", flags: 64 });
+        return;
+      }
+      if (action === "cancel") {
+        pendingVideoRequests.delete(requestId);
+        await interaction.update({ content: "キャンセルしました。", components: [] });
+        return;
+      }
+      if (action !== "confirm") return;
+      pendingVideoRequests.delete(requestId);
+      await interaction.update({
+        content: `動画生成を開始しました。\nquality: ${request.quality}\nsize: ${request.size}\nduration: ${request.duration}s`,
+        components: [],
+      });
+      try {
+        await sendDirectVideoResultForUserWithOptions(interaction.channel, request.prompt, interaction.user.id, {
+          size: request.size,
+          duration: request.duration,
+        });
+        await interaction.followUp({ content: "動画生成が完了しました。結果はこのチャンネルに投稿しました。", flags: 64 });
+      } catch (error) {
+        console.error("[slash video confirm] failed:", error?.stack || error);
+        await interaction.followUp({ content: `動画生成に失敗しました: \`${error.message || error}\``, flags: 64 });
+      }
+      return;
+    }
     if (!interaction.customId.startsWith("publish:")) return;
     const publishId = interaction.customId.slice("publish:".length);
     const result = publishResults.get(publishId);
@@ -2831,15 +2924,38 @@ client.on("interactionCreate", async (interaction) => {
     }
   }
   if (interaction.commandName === "video") {
-    const prompt = interaction.options.getString("prompt", true);
-    await interaction.deferReply();
-    await interaction.editReply(`\u52d5\u753b\u751f\u6210\u30ea\u30af\u30a8\u30b9\u30c8\u3092\u53d7\u3051\u4ed8\u3051\u307e\u3057\u305f\u3002\u751f\u6210\u4e2d...\n${sora2MigrationNotice()}`);
     try {
-      await sendDirectVideoResultForUser(interaction.channel, prompt, interaction.user.id);
-      await interaction.editReply("\u52d5\u753b\u751f\u6210\u304c\u5b8c\u4e86\u3057\u307e\u3057\u305f\u3002\u7d50\u679c\u306f\u3053\u306e\u30c1\u30e3\u30f3\u30cd\u30eb\u306b\u6295\u7a3f\u3057\u307e\u3057\u305f\u3002");
+      const prompt = interaction.options.getString("prompt", true);
+      const quality = interaction.options.getString("quality") || DEFAULT_VIDEO_QUALITY;
+      const duration = normalizeVideoDurationSeconds(interaction.options.getInteger("duration") || DEFAULT_VIDEO_DURATION_SECONDS);
+      const size = videoQualityToSize(quality);
+      const requestId = crypto.randomBytes(12).toString("hex");
+      pendingVideoRequests.set(requestId, {
+        userId: interaction.user.id,
+        channelId: interaction.channelId,
+        prompt,
+        quality: size.quality,
+        size: size.size,
+        duration,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      });
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`video:confirm:${requestId}`).setLabel("生成する").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`video:cancel:${requestId}`).setLabel("キャンセル").setStyle(ButtonStyle.Secondary)
+      );
+      await interaction.reply({
+        content:
+          `⚠️ 動画生成は高コストです。高画質・長時間ほどOpenRouter APIキーの利用料金が増えます。\n` +
+          `quality: ${size.quality}\n` +
+          `size: ${size.size}\n` +
+          `duration: ${duration}s\n` +
+          "続行しますか？",
+        components: [row],
+        flags: 64,
+      });
     } catch (error) {
       console.error("[slash video] failed:", error?.stack || error);
-      await interaction.editReply(`\u52d5\u753b\u751f\u6210\u306b\u5931\u6557\u3057\u307e\u3057\u305f: \`${error.message || error}\``);
+      await interaction.reply({ content: `動画生成リクエストを受け付けられませんでした: \`${error.message || error}\``, flags: 64 });
     }
     return;
   }

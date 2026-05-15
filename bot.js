@@ -142,7 +142,17 @@ const VIDEO_QUALITY_SIZES = {
 };
 const DEFAULT_VIDEO_QUALITY = "480p";
 const DEFAULT_VIDEO_DURATION_SECONDS = 3;
-const MAX_VIDEO_DURATION_SECONDS = 5;
+const MAX_VIDEO_DURATION_SECONDS = 15;
+const VIDEO_MODEL_DURATION_LIMITS = {
+  "bytedance/seedance-2.0-fast": { min: 1, max: 15, default: 3 },
+  "bytedance/seedance-2.0": { min: 1, max: 15, default: 3 },
+  "alibaba/wan-2.6": { min: 1, max: 15, default: 3 },
+  "alibaba/wan-2.7": { min: 1, max: 15, default: 3 },
+  "google/veo-3.1": { allowed: [4, 6, 8], default: 4 },
+  "google/veo-3.1-fast": { allowed: [4, 6, 8], default: 4 },
+  "veo-3.1-lite-generate-preview": { allowed: [4, 6, 8], default: 4 },
+  "sora-2": { min: 1, max: 5, default: 3 },
+};
 const SUPPORT_MESSAGE = [
   "DisCoderをご利用いただき、ありがとうございます。",
   "DisCoderは実験中のAI Discord Botです。",
@@ -165,7 +175,8 @@ const HELP_MESSAGE = [
   "`/review` コードレビューをします。ファイル添付も使えます。",
   "`/debug` エラーやログから原因を分析します。",
   "`/generate feature` 機能追加を生成します。",
-  "`/video` 動画生成。reference_video に添付動画を入れると内容を読んで反映します。",
+  "`/video` 動画生成。durationの範囲は動画モデルごとに自動判定します。",
+  "reference_video に添付動画を入れると内容を読んで反映します。",
   "動画生成は実行前に高コスト警告と確認ボタンが出ます。",
   "",
   "**VCの使い方**",
@@ -480,6 +491,40 @@ function normalizeVideoDurationSeconds(value = DEFAULT_VIDEO_DURATION_SECONDS) {
   if (!Number.isFinite(duration) || duration <= 0) throw new Error("durationは1秒以上で指定してください。");
   if (duration > MAX_VIDEO_DURATION_SECONDS) throw new Error(`durationは最大${MAX_VIDEO_DURATION_SECONDS}秒までです。`);
   return Math.ceil(duration);
+}
+
+function videoDurationLimitForModel(model) {
+  const key = String(model || "").replace(/^openrouter\//, "").toLowerCase();
+  return VIDEO_MODEL_DURATION_LIMITS[key] || { min: 1, max: MAX_VIDEO_DURATION_SECONDS, default: DEFAULT_VIDEO_DURATION_SECONDS };
+}
+
+function describeVideoDurationLimit(model) {
+  const limit = videoDurationLimitForModel(model);
+  if (limit.allowed) return `${limit.allowed.join(" / ")}秒`;
+  return `${limit.min || 1}〜${limit.max || MAX_VIDEO_DURATION_SECONDS}秒`;
+}
+
+function normalizeVideoDurationForModel(value, model, explicit = false) {
+  const limit = videoDurationLimitForModel(model);
+  const duration = normalizeVideoDurationSeconds(
+    explicit ? value : (limit.default || DEFAULT_VIDEO_DURATION_SECONDS)
+  );
+  if (limit.allowed && !limit.allowed.includes(duration)) {
+    throw new Error(`durationはモデル \`${model}\` では ${limit.allowed.join(" / ")} 秒のみ指定できます。`);
+  }
+  const min = limit.min || 1;
+  const max = limit.max || MAX_VIDEO_DURATION_SECONDS;
+  if (duration < min || duration > max) {
+    throw new Error(`durationはモデル \`${model}\` では ${min}〜${max}秒で指定してください。`);
+  }
+  return duration;
+}
+
+function primaryVideoModelForUser(userId) {
+  const config = openRouterMediaConfig(userId);
+  const provider = config.videoProvider || "auto";
+  if (provider === "openrouter") return config.videoModel || OPENROUTER_VIDEO_MODEL;
+  return puterVideoModelForDate();
 }
 
 function cleanupPendingVideoRequests() {
@@ -855,12 +900,13 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null, requestedDuration = DEFAULT_VIDEO_DURATION_SECONDS) {
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null, requestedDuration = null) {
   if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, false, requestedSize, requestedDuration);
   const model = preferredModel;
   try {
     const puter = await getPuter(userId);
-    const options = { model };
+    const duration = normalizeVideoDurationForModel(requestedDuration, model, requestedDuration != null);
+    const options = { model, duration };
     console.log(`[txt2vid] start model=${model} prompt=${prompt.slice(0, 200)}`);
     const video = await withTimeout(puter.ai.txt2vid(prompt, options), `puter.ai.txt2vid ${model}`, 10 * 60 * 1000);
     console.log(`[txt2vid] response model=${model} raw=${summarizeValue(video).slice(0, 500)}`);
@@ -1079,12 +1125,12 @@ async function describeVideoAttachmentWithOpenRouter(attachment, userPrompt, use
   return { description: text, usageLine: aiUsageLine(response) };
 }
 
-async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = DEFAULT_VIDEO_DURATION_SECONDS) {
+async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = null) {
   const config = openRouterMediaConfig(userId);
   if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
   const model = config.videoModel;
   const videoSize = normalizeVideoSize(requestedSize || config.videoSize);
-  const duration = normalizeVideoDurationSeconds(requestedDuration);
+  const duration = normalizeVideoDurationForModel(requestedDuration, model, requestedDuration != null);
   const createResponse = await withTimeout(
     fetch(`${OPENROUTER_API_BASE}/videos`, {
       method: "POST",
@@ -2498,6 +2544,8 @@ async function sendTalkImageResult(session, text, userId = null) {
 
 async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   const prompt = extractVideoPrompt(text) || text;
+  const model = puterVideoModelForDate();
+  const durationModel = primaryVideoModelForUser(userId);
   let generationPrompt = prompt;
   let referenceUsageLine = "";
   if (options.videoAttachment) {
@@ -2512,9 +2560,8 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
       "上記の参照動画の内容を反映して生成してください。",
     ].join("\n");
   }
-  const model = puterVideoModelForDate();
   const requestedSize = options.size ? normalizeVideoSize(options.size) : extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
-  const requestedDuration = normalizeVideoDurationSeconds(options.duration || DEFAULT_VIDEO_DURATION_SECONDS);
+  const requestedDuration = normalizeVideoDurationForModel(options.duration, durationModel, options.duration != null);
   const notice = sora2MigrationNotice();
   const routeLabel = mediaRouteLabel(userId, "video", model);
   console.log(`[talk] txt2vid route prompt=${generationPrompt.slice(0, 200)} route=${routeLabel}`);
@@ -2533,10 +2580,11 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
         const fallbackModel = "veo-3.1-lite-generate-preview";
+        const fallbackDuration = normalizeVideoDurationForModel(options.duration, fallbackModel, options.duration != null);
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(generationPrompt, fallbackModel, userId, requestedSize.size, requestedDuration);
+        result = await generateVideoAttachment(generationPrompt, fallbackModel, userId, requestedSize.size, fallbackDuration);
         usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
@@ -2822,7 +2870,7 @@ client.once("clientReady", async () => {
       .addIntegerOption((option) =>
         option
           .setName("duration")
-          .setDescription("Video duration seconds, max 5")
+          .setDescription("Video duration seconds. Valid range depends on the selected model.")
           .setRequired(false)
           .setMinValue(1)
           .setMaxValue(MAX_VIDEO_DURATION_SECONDS)
@@ -3079,7 +3127,9 @@ client.on("interactionCreate", async (interaction) => {
     try {
       const prompt = interaction.options.getString("prompt", true);
       const quality = interaction.options.getString("quality") || DEFAULT_VIDEO_QUALITY;
-      const duration = normalizeVideoDurationSeconds(interaction.options.getInteger("duration") || DEFAULT_VIDEO_DURATION_SECONDS);
+      const durationInput = interaction.options.getInteger("duration");
+      const durationModel = primaryVideoModelForUser(interaction.user.id);
+      const duration = normalizeVideoDurationForModel(durationInput, durationModel, durationInput != null);
       const size = videoQualityToSize(quality);
       const referenceVideo = interaction.options.getAttachment("reference_video");
       if (referenceVideo && !isVideoAttachment(referenceVideo)) {
@@ -3111,6 +3161,7 @@ client.on("interactionCreate", async (interaction) => {
           SUPPORT_NOTICE +
           "\n\n" +
           (referenceVideo ? `reference_video: ${referenceVideo.name || "attached video"}\n` : "") +
+          `model duration: ${durationModel} (${describeVideoDurationLimit(durationModel)})\n` +
           `quality: ${size.quality}\n` +
           `size: ${size.size}\n` +
           `duration: ${duration}s\n` +
@@ -3166,7 +3217,7 @@ client.on("interactionCreate", async (interaction) => {
       const videoSize = normalizeVideoSize(interaction.options.getString("video_size") || OPENROUTER_VIDEO_SIZE).size;
       saveOpenRouterConfig(interaction.user.id, { apiKey, model, imageModel, visionModel, videoModel, videoSize, fallbackEnabled: true });
       await interaction.reply({
-        content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーへフォールバックします。\nText: \`${model}\`\nImage: \`${imageModel}\`\nVision: \`${visionModel}\`\nVideo: \`${videoModel}\`\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
+        content: `OpenRouterを連携しました。Puter上限時はユーザー個別のOpenRouterキーへフォールバックします。\nText: \`${model}\`\nImage: \`${imageModel}\`\nVision: \`${visionModel}\`\nVideo: \`${videoModel}\`\nVideo duration: ${describeVideoDurationLimit(videoModel)}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`,
         flags: 64,
       });
       return;
@@ -3186,8 +3237,9 @@ client.on("interactionCreate", async (interaction) => {
       if (model) next[`${kind}Model`] = model.trim();
       if (kind === "video" && size) next.videoSize = normalizeVideoSize(size).size;
       saveOpenRouterConfig(interaction.user.id, next);
+      const durationLine = kind === "video" ? `\nVideo duration: ${describeVideoDurationLimit(next.videoModel || OPENROUTER_VIDEO_MODEL)}` : "";
       await interaction.reply({
-        content: `${kind} の経路を \`${provider}\` にしました。${next[`${kind}Model`] ? `OpenRouter model: \`${next[`${kind}Model`]}\`` : ""}`,
+        content: `${kind} の経路を \`${provider}\` にしました。${next[`${kind}Model`] ? `OpenRouter model: \`${next[`${kind}Model`]}\`` : ""}${durationLine}`,
         flags: 64,
       });
       return;
@@ -3207,7 +3259,7 @@ client.on("interactionCreate", async (interaction) => {
       const config = loadOpenRouterConfig(interaction.user.id);
       await interaction.reply({
         content: config?.apiKey
-          ? `OpenRouter連携済みです。\nText: \`${config.model || OPENROUTER_DEFAULT_MODEL}\`\nImage: \`${config.imageModel || OPENROUTER_IMAGE_MODEL}\` (${config.imageProvider || "auto"})\nVision: \`${config.visionModel || OPENROUTER_VISION_MODEL}\` (${config.visionProvider || "auto"})\nVideo: \`${config.videoModel || OPENROUTER_VIDEO_MODEL}\` (${config.videoProvider || "auto"})\nPuter上限時フォールバック: ${config.fallbackEnabled !== false ? "有効" : "無効"}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`
+          ? `OpenRouter連携済みです。\nText: \`${config.model || OPENROUTER_DEFAULT_MODEL}\`\nImage: \`${config.imageModel || OPENROUTER_IMAGE_MODEL}\` (${config.imageProvider || "auto"})\nVision: \`${config.visionModel || OPENROUTER_VISION_MODEL}\` (${config.visionProvider || "auto"})\nVideo: \`${config.videoModel || OPENROUTER_VIDEO_MODEL}\` (${config.videoProvider || "auto"})\nVideo duration: ${describeVideoDurationLimit(config.videoModel || OPENROUTER_VIDEO_MODEL)}\nPuter上限時フォールバック: ${config.fallbackEnabled !== false ? "有効" : "無効"}\n円換算レート: 1 USD = ${OPENROUTER_USD_JPY}円`
           : "OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。",
         flags: 64,
       });

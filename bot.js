@@ -370,7 +370,7 @@ function normalizeVideoSize(value = OPENROUTER_VIDEO_SIZE) {
       size: size.size,
       width: size.width,
       height: size.height,
-      resolution: size.quality,
+      resolution: openRouterResolutionForHeight(size.height),
       aspectRatio: aspectRatioForSize(size.width, size.height),
     };
   }
@@ -391,9 +391,15 @@ function normalizeVideoSize(value = OPENROUTER_VIDEO_SIZE) {
   if (!match) return value === "1280x720" ? { size: "1280x720", width: 1280, height: 720, resolution: "720p", aspectRatio: "16:9" } : normalizeVideoSize("1280x720");
   const width = Number(match[1]);
   const height = Number(match[2]);
-  const resolution = Math.max(width, height) >= 1900 ? "1080p" : Math.max(width, height) >= 1280 ? "720p" : "480p";
+  const resolution = openRouterResolutionForHeight(Math.min(width, height));
   const aspectRatio = aspectRatioForSize(width, height);
   return { size: `${width}x${height}`, width, height, resolution, aspectRatio };
+}
+
+function openRouterResolutionForHeight(height) {
+  if (height >= 1080) return "1080p";
+  if (height >= 720) return "720p";
+  return "480p";
 }
 
 function aspectRatioForSize(width, height) {
@@ -1010,9 +1016,6 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
         duration,
         resolution: videoSize.resolution,
         aspect_ratio: videoSize.aspectRatio,
-        size: videoSize.size,
-        width: videoSize.width,
-        height: videoSize.height,
       }),
     }),
     `openrouter.video.create ${model}`,

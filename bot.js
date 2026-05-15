@@ -152,6 +152,11 @@ const SUPPORT_MESSAGE = [
   "",
   "支援は任意です。ありがとうございます。",
 ].join("\n");
+const SUPPORT_NOTICE = [
+  "DisCoderは実験中のAI Discord Botです。",
+  "TTSや開発用のAPIなど、一部機能には開発者側のAI APIの利用料金も発生します。",
+  "開発・運用費の任意支援: https://ofuse.me/a753ea67",
+].join("\n");
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
   "Python",
@@ -2109,7 +2114,9 @@ async function startTalkSession(message, voiceChannel) {
   attachVoiceReceiveDiagnostics(session);
 
   await reportVoiceDiagnostics(session, voiceChannel);
-  await waitMessage.edit(`Coderたんが ${voiceChannel} に参加しました。現在はコーディングモードです。VCで「コーダーたん！」と呼ぶか、このチャンネルでメンションしてください。「雑談モード」「コーディングモード」で切り替えできます。`);
+  await waitMessage.edit(
+    `Coderたんが ${voiceChannel} に参加しました。現在はコーディングモードです。VCで「コーダーたん！」と呼ぶか、このチャンネルでメンションしてください。「雑談モード」「コーディングモード」で切り替えできます。\n\n${SUPPORT_NOTICE}`
+  );
   return session;
 }
 
@@ -2992,6 +2999,8 @@ client.on("interactionCreate", async (interaction) => {
           "\u26a0\ufe0f \u52d5\u753b\u751f\u6210\u306f\u9ad8\u30b3\u30b9\u30c8\u3067\u3059\u3002\n" +
           "OpenRouter\u3067\u306f480p\u4ee5\u4e0a\u304c\u6700\u4f4e\u89e3\u50cf\u5ea6\u3067\u3059\u3002\n" +
           "\u9ad8\u753b\u8cea\u30fb\u9577\u6642\u9593\u307b\u3069\u6599\u91d1\u304c\u5927\u304d\u304f\u5897\u3048\u307e\u3059\u3002\n" +
+          SUPPORT_NOTICE +
+          "\n\n" +
           `quality: ${size.quality}\n` +
           `size: ${size.size}\n` +
           `duration: ${duration}s\n` +
@@ -3150,7 +3159,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
     session.busy = true;
-    await message.reply("動画生成リクエストを受け付けました。生成中...");
+    await message.reply(`動画生成リクエストを受け付けました。生成中...\n\n${SUPPORT_NOTICE}`);
     try {
       await sendDirectVideoResultForUser(message.channel, content, message.author.id);
       session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
@@ -3172,7 +3181,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
     if (session) session.busy = true;
-    await message.reply("動画生成リクエストを受け付けました。生成中...");
+    await message.reply(`動画生成リクエストを受け付けました。生成中...\n\n${SUPPORT_NOTICE}`);
     try {
       await sendDirectVideoResultForUser(message.channel, content, message.author.id);
       if (session) {

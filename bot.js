@@ -176,7 +176,7 @@ const HELP_MESSAGE = [
   "`/debug` エラーやログから原因を分析します。",
   "`/generate feature` 機能追加を生成します。",
   "`/video` 動画生成。durationの範囲は動画モデルごとに自動判定します。",
-  "reference_video に添付動画を入れると内容を読んで反映します。",
+  "reference_video は参照動画、extend_video は動画拡張、key_visual は顔や衣装の固定参照です。",
   "動画生成は実行前に高コスト警告と確認ボタンが出ます。",
   "",
   "**VCの使い方**",
@@ -900,8 +900,10 @@ function extensionForMimeType(mimeType, fallback = "bin") {
   return fallback;
 }
 
-async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null, requestedDuration = null) {
-  if (shouldUseOpenRouterMedia(userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, false, requestedSize, requestedDuration);
+async function generateVideoAttachment(prompt, preferredModel = puterVideoModelForDate(), userId = null, requestedSize = null, requestedDuration = null, options = {}) {
+  if (options.forceOpenRouter || shouldUseOpenRouterMedia(userId, "video")) {
+    return generateOpenRouterVideoAttachment(prompt, userId, Boolean(options.forceOpenRouter), requestedSize, requestedDuration, options);
+  }
   const model = preferredModel;
   try {
     const puter = await getPuter(userId);
@@ -920,7 +922,7 @@ async function generateVideoAttachment(prompt, preferredModel = puterVideoModelF
       model,
     };
   } catch (error) {
-    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true, requestedSize, requestedDuration);
+    if (shouldFallbackToOpenRouterMedia(error, userId, "video")) return generateOpenRouterVideoAttachment(prompt, userId, true, requestedSize, requestedDuration, options);
     throw error;
   }
 }
@@ -1125,12 +1127,23 @@ async function describeVideoAttachmentWithOpenRouter(attachment, userPrompt, use
   return { description: text, usageLine: aiUsageLine(response) };
 }
 
-async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = null) {
+async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = null, options = {}) {
   const config = openRouterMediaConfig(userId);
   if (!config.apiKey) throw new Error("OpenRouter未連携です。`/openrouter connect` で自分のAPIキーを登録してください。");
   const model = config.videoModel;
   const videoSize = normalizeVideoSize(requestedSize || config.videoSize);
   const duration = normalizeVideoDurationForModel(requestedDuration, model, requestedDuration != null);
+  const inputReferences = (options.referenceImages || [])
+    .filter((item) => item?.url)
+    .map((item) => ({ type: "image_url", image_url: { url: item.url } }));
+  const body = {
+    model,
+    prompt: String(prompt),
+    duration,
+    resolution: videoSize.resolution,
+    aspect_ratio: videoSize.aspectRatio,
+  };
+  if (inputReferences.length) body.input_references = inputReferences;
   const createResponse = await withTimeout(
     fetch(`${OPENROUTER_API_BASE}/videos`, {
       method: "POST",
@@ -1140,13 +1153,7 @@ async function generateOpenRouterVideoAttachment(prompt, userId, fallback = fals
         "HTTP-Referer": "https://github.com/higashiikenaga/discoder",
         "X-Title": "DisCoder",
       },
-      body: JSON.stringify({
-        model,
-        prompt: String(prompt),
-        duration,
-        resolution: videoSize.resolution,
-        aspect_ratio: videoSize.aspectRatio,
-      }),
+      body: JSON.stringify(body),
     }),
     `openrouter.video.create ${model}`,
     30000
@@ -2450,6 +2457,14 @@ function hasImageAttachment(attachments = []) {
   return attachments.some((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
 }
 
+function isImageAttachment(attachment) {
+  return Boolean(attachment?.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment?.url || ""));
+}
+
+function findImageAttachment(attachments = []) {
+  return attachments.find(isImageAttachment) || null;
+}
+
 function isVideoAttachment(attachment) {
   return Boolean(attachment?.contentType?.startsWith("video/") || /\.(mp4|mpeg|mpg|mov|webm)($|\?)/i.test(attachment?.url || ""));
 }
@@ -2548,16 +2563,44 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   const durationModel = primaryVideoModelForUser(userId);
   let generationPrompt = prompt;
   let referenceUsageLine = "";
+  const videoReferences = [options.videoAttachment, options.extendVideoAttachment].filter(Boolean);
+  const imageReferences = [options.keyVisualAttachment].filter(Boolean);
+  const shouldForceOpenRouter = Boolean(options.extendVideoAttachment || options.keyVisualAttachment);
+  if (options.extendVideoAttachment) {
+    generationPrompt = [
+      generationPrompt,
+      "",
+      "これはVideo Extensionです。添付された延長元動画の直後に自然につながる次のカットとして生成してください。",
+      "顔、衣装、色、背景、カメラ方向を維持し、急な別人化や別シーン化を避けてください。",
+    ].join("\n");
+  }
   if (options.videoAttachment) {
     const reference = await describeVideoAttachmentWithOpenRouter(options.videoAttachment, prompt, userId);
     referenceUsageLine = reference.usageLine;
     generationPrompt = [
-      prompt,
+      generationPrompt,
       "",
       "添付動画の参照内容:",
       reference.description,
       "",
       "上記の参照動画の内容を反映して生成してください。",
+    ].join("\n");
+  }
+  if (options.extendVideoAttachment && options.extendVideoAttachment !== options.videoAttachment) {
+    const reference = await describeVideoAttachmentWithOpenRouter(options.extendVideoAttachment, prompt, userId);
+    referenceUsageLine = [referenceUsageLine, reference.usageLine].filter(Boolean).join("\n");
+    generationPrompt = [
+      generationPrompt,
+      "",
+      "延長元動画の内容:",
+      reference.description,
+    ].join("\n");
+  }
+  if (options.keyVisualAttachment) {
+    generationPrompt = [
+      generationPrompt,
+      "",
+      "キービジュアル画像をキャラクター・顔・衣装・配色の固定参照として使い続けてください。",
     ].join("\n");
   }
   const requestedSize = options.size ? normalizeVideoSize(options.size) : extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
@@ -2567,7 +2610,7 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   console.log(`[talk] txt2vid route prompt=${generationPrompt.slice(0, 200)} route=${routeLabel}`);
   const loading = await sendLoadingMessage(
     session.textChannel,
-    `動画を生成中... 経路: \`${routeLabel}\`\n${options.videoAttachment ? "添付動画を参照しています。\n" : ""}${notice}\n\`${prompt.slice(0, 160)}\``,
+    `動画を生成中... 経路: \`${routeLabel}\`\n${videoReferences.length || imageReferences.length ? "添付素材を参照しています。\n" : ""}${notice}\n\`${prompt.slice(0, 160)}\``,
     `動画を生成中... 経路: \`${routeLabel}\`\n${notice}`
   );
   try {
@@ -2575,7 +2618,10 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
     let result;
     let usageLine = "";
     try {
-      result = await generateVideoAttachment(generationPrompt, model, userId, requestedSize.size, requestedDuration);
+      result = await generateVideoAttachment(generationPrompt, model, userId, requestedSize.size, requestedDuration, {
+        referenceImages: imageReferences,
+        forceOpenRouter: shouldForceOpenRouter,
+      });
       usageLine = aiUsageLine(result);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
@@ -2584,7 +2630,10 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(generationPrompt, fallbackModel, userId, requestedSize.size, fallbackDuration);
+        result = await generateVideoAttachment(generationPrompt, fallbackModel, userId, requestedSize.size, fallbackDuration, {
+          referenceImages: imageReferences,
+          forceOpenRouter: shouldForceOpenRouter,
+        });
         usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
@@ -2880,6 +2929,18 @@ client.once("clientReady", async () => {
           .setName("reference_video")
           .setDescription("Reference video to read before generation")
           .setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option
+          .setName("extend_video")
+          .setDescription("Video to extend from")
+          .setRequired(false)
+      )
+      .addAttachmentOption((option) =>
+        option
+          .setName("key_visual")
+          .setDescription("Key visual image to keep character consistency during extension")
+          .setRequired(false)
       ),
     new SlashCommandBuilder()
       .setName("support")
@@ -2970,7 +3031,7 @@ client.on("interactionCreate", async (interaction) => {
       if (action !== "confirm") return;
       pendingVideoRequests.delete(requestId);
       await interaction.update({
-        content: `動画生成を開始しました。\nquality: ${request.quality}\nsize: ${request.size}\nduration: ${request.duration}s${request.videoAttachment ? "\n添付動画: 参照します" : ""}`,
+        content: `動画生成を開始しました。\nquality: ${request.quality}\nsize: ${request.size}\nduration: ${request.duration}s${request.videoAttachment ? "\n添付動画: 参照します" : ""}${request.extendVideoAttachment ? "\n動画拡張: 有効" : ""}${request.keyVisualAttachment ? "\nキービジュアル: 参照します" : ""}`,
         components: [],
       });
       try {
@@ -2979,6 +3040,8 @@ client.on("interactionCreate", async (interaction) => {
           size: request.size,
           duration: request.duration,
           videoAttachment: request.videoAttachment,
+          extendVideoAttachment: request.extendVideoAttachment,
+          keyVisualAttachment: request.keyVisualAttachment,
         });
         await interaction.followUp({ content: "動画生成が完了しました。結果はこのチャンネルに投稿しました。", flags: 64 });
       } catch (error) {
@@ -3136,6 +3199,16 @@ client.on("interactionCreate", async (interaction) => {
         await interaction.reply({ content: "reference_video には mp4 / mov / webm などの動画ファイルを添付してください。", flags: 64 });
         return;
       }
+      const extendVideo = interaction.options.getAttachment("extend_video");
+      if (extendVideo && !isVideoAttachment(extendVideo)) {
+        await interaction.reply({ content: "extend_video には mp4 / mov / webm などの動画ファイルを添付してください。", flags: 64 });
+        return;
+      }
+      const keyVisual = interaction.options.getAttachment("key_visual");
+      if (keyVisual && !isImageAttachment(keyVisual)) {
+        await interaction.reply({ content: "key_visual には png / jpg / webp などの画像ファイルを添付してください。", flags: 64 });
+        return;
+      }
       const requestId = crypto.randomBytes(12).toString("hex");
       pendingVideoRequests.set(requestId, {
         userId: interaction.user.id,
@@ -3146,6 +3219,12 @@ client.on("interactionCreate", async (interaction) => {
         duration,
         videoAttachment: referenceVideo
           ? { url: referenceVideo.url, name: referenceVideo.name, contentType: referenceVideo.contentType, size: referenceVideo.size }
+          : null,
+        extendVideoAttachment: extendVideo
+          ? { url: extendVideo.url, name: extendVideo.name, contentType: extendVideo.contentType, size: extendVideo.size }
+          : null,
+        keyVisualAttachment: keyVisual
+          ? { url: keyVisual.url, name: keyVisual.name, contentType: keyVisual.contentType, size: keyVisual.size }
           : null,
         expiresAt: Date.now() + 10 * 60 * 1000,
       });
@@ -3161,6 +3240,9 @@ client.on("interactionCreate", async (interaction) => {
           SUPPORT_NOTICE +
           "\n\n" +
           (referenceVideo ? `reference_video: ${referenceVideo.name || "attached video"}\n` : "") +
+          (extendVideo ? `extend_video: ${extendVideo.name || "attached video"}\n` : "") +
+          (keyVisual ? `key_visual: ${keyVisual.name || "attached image"}\n` : "") +
+          (extendVideo && !keyVisual ? "warning: 動画拡張では顔・衣装維持のため key_visual も推奨です。\n" : "") +
           `model duration: ${durationModel} (${describeVideoDurationLimit(durationModel)})\n` +
           `quality: ${size.quality}\n` +
           `size: ${size.size}\n` +
@@ -3325,6 +3407,7 @@ client.on("messageCreate", async (message) => {
     try {
       await sendDirectVideoResultForUserWithOptions(message.channel, content, message.author.id, {
         videoAttachment: findVideoAttachment(message.attachments),
+        keyVisualAttachment: findImageAttachment(message.attachments),
       });
       session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
       session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
@@ -3349,6 +3432,7 @@ client.on("messageCreate", async (message) => {
     try {
       await sendDirectVideoResultForUserWithOptions(message.channel, content, message.author.id, {
         videoAttachment: findVideoAttachment(message.attachments),
+        keyVisualAttachment: findImageAttachment(message.attachments),
       });
       if (session) {
         session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });

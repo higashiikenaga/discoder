@@ -89,7 +89,7 @@ Discordでは次を使います。
 /help
 /support
 /talk leave
-/video prompt:<what to generate> quality:<480p|720p|1080p> duration:<model-specific> reference_video:<optional video>
+/video prompt:<what to generate> quality:<480p|720p|1080p> duration:<model-specific> reference_video:<optional video> extend_video:<optional video> key_visual:<optional image>
 ```
 
 トークコーディング開始後、開始した人が `@DisCoder 完成` と送ると、Node版は最終プロジェクトを生成し、zipと `preview.png` を投稿します。Google Drive連携済みなら同じファイルをDriveにも保存します。

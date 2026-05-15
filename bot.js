@@ -165,7 +165,8 @@ const HELP_MESSAGE = [
   "`/review` コードレビューをします。ファイル添付も使えます。",
   "`/debug` エラーやログから原因を分析します。",
   "`/generate feature` 機能追加を生成します。",
-  "`/video` 動画生成。実行前に高コスト警告と確認ボタンが出ます。",
+  "`/video` 動画生成。reference_video に添付動画を入れると内容を読んで反映します。",
+  "動画生成は実行前に高コスト警告と確認ボタンが出ます。",
   "",
   "**VCの使い方**",
   "`/talk join` VCに参加します。未指定なら自分がいるVCを使います。",
@@ -1045,6 +1046,37 @@ async function extractTextFromImageSourceWithOpenRouter(source, userId, fallback
   if (response.__discoder_ai) response.__discoder_ai.fallback = fallback;
   const usageLine = aiUsageLine(response);
   return `${extractText(response).trim()}${usageLine ? `\n\n${usageLine}` : ""}`.trim();
+}
+
+async function describeVideoAttachmentWithOpenRouter(attachment, userPrompt, userId) {
+  const config = openRouterMediaConfig(userId);
+  if (!config.apiKey) throw new Error("添付動画の読み込みにはOpenRouter連携が必要です。`/openrouter connect` で自分のAPIキーを登録してください。");
+  const model = config.visionModel;
+  const sourceUrl = attachment.url;
+  if (!sourceUrl) throw new Error("添付動画のURLを取得できませんでした。");
+  const prompt = [
+    "添付動画を解析し、これから動画生成モデルへ渡すための参照説明を日本語で短く作ってください。",
+    "人物、服装、動き、構図、背景、カメラワーク、雰囲気を優先してください。",
+    "ユーザーの生成指示:",
+    String(userPrompt || "動画生成"),
+  ].join("\n");
+  const response = await openRouterChat(
+    [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "video_url", videoUrl: { url: sourceUrl } },
+        ],
+      },
+    ],
+    `openrouter/${model}`,
+    "openrouter video reference",
+    userId
+  );
+  const text = extractText(response).trim();
+  if (!text) throw new Error("添付動画の解析結果が空でした。");
+  return { description: text, usageLine: aiUsageLine(response) };
 }
 
 async function generateOpenRouterVideoAttachment(prompt, userId, fallback = false, requestedSize = null, requestedDuration = DEFAULT_VIDEO_DURATION_SECONDS) {
@@ -2372,6 +2404,14 @@ function hasImageAttachment(attachments = []) {
   return attachments.some((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
 }
 
+function isVideoAttachment(attachment) {
+  return Boolean(attachment?.contentType?.startsWith("video/") || /\.(mp4|mpeg|mpg|mov|webm)($|\?)/i.test(attachment?.url || ""));
+}
+
+function findVideoAttachment(attachments = []) {
+  return attachments.find(isVideoAttachment) || null;
+}
+
 function isImageToTextRequest(text, attachments = []) {
   return (
     hasImageAttachment(attachments) &&
@@ -2458,15 +2498,29 @@ async function sendTalkImageResult(session, text, userId = null) {
 
 async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   const prompt = extractVideoPrompt(text) || text;
+  let generationPrompt = prompt;
+  let referenceUsageLine = "";
+  if (options.videoAttachment) {
+    const reference = await describeVideoAttachmentWithOpenRouter(options.videoAttachment, prompt, userId);
+    referenceUsageLine = reference.usageLine;
+    generationPrompt = [
+      prompt,
+      "",
+      "添付動画の参照内容:",
+      reference.description,
+      "",
+      "上記の参照動画の内容を反映して生成してください。",
+    ].join("\n");
+  }
   const model = puterVideoModelForDate();
   const requestedSize = options.size ? normalizeVideoSize(options.size) : extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
   const requestedDuration = normalizeVideoDurationSeconds(options.duration || DEFAULT_VIDEO_DURATION_SECONDS);
   const notice = sora2MigrationNotice();
   const routeLabel = mediaRouteLabel(userId, "video", model);
-  console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} route=${routeLabel}`);
+  console.log(`[talk] txt2vid route prompt=${generationPrompt.slice(0, 200)} route=${routeLabel}`);
   const loading = await sendLoadingMessage(
     session.textChannel,
-    `動画を生成中... 経路: \`${routeLabel}\`\n${notice}\n\`${prompt.slice(0, 160)}\``,
+    `動画を生成中... 経路: \`${routeLabel}\`\n${options.videoAttachment ? "添付動画を参照しています。\n" : ""}${notice}\n\`${prompt.slice(0, 160)}\``,
     `動画を生成中... 経路: \`${routeLabel}\`\n${notice}`
   );
   try {
@@ -2474,7 +2528,7 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
     let result;
     let usageLine = "";
     try {
-      result = await generateVideoAttachment(prompt, model, userId, requestedSize.size, requestedDuration);
+      result = await generateVideoAttachment(generationPrompt, model, userId, requestedSize.size, requestedDuration);
       usageLine = aiUsageLine(result);
     } catch (error) {
       if (model === "sora-2" && (error.code === "insufficient_funds" || /insufficient[_\s-]?funds/i.test(error.message || ""))) {
@@ -2482,7 +2536,7 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
         await loading.message
           .edit(`Sora2の残高不足を検出しました。Google Veoに自動フォールバックします... モデル: \`${fallbackModel}\`\n\`${prompt.slice(0, 160)}\``)
           .catch(() => {});
-        result = await generateVideoAttachment(prompt, fallbackModel, userId, requestedSize.size, requestedDuration);
+        result = await generateVideoAttachment(generationPrompt, fallbackModel, userId, requestedSize.size, requestedDuration);
         usageLine = aiUsageLine(result);
         result.fallbackFrom = model;
       } else {
@@ -2495,6 +2549,7 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
       content: `**動画生成**\nモデル: \`${result.model}\`${fallbackText}\n${notice}\n${prompt}\n完了: ${loading.elapsedSeconds()} 秒`.slice(0, 2000),
       files: [result.attachment],
     });
+    if (referenceUsageLine) await session.textChannel.send(referenceUsageLine).catch(() => {});
     if (usageLine) await session.textChannel.send(usageLine).catch(() => {});
   } catch (error) {
     await loading.message.edit(`動画生成は完了しましたが、Discord添付に変換できませんでした: \`${error.message}\``.slice(0, 2000)).catch(() => {});
@@ -2771,6 +2826,12 @@ client.once("clientReady", async () => {
           .setRequired(false)
           .setMinValue(1)
           .setMaxValue(MAX_VIDEO_DURATION_SECONDS)
+      )
+      .addAttachmentOption((option) =>
+        option
+          .setName("reference_video")
+          .setDescription("Reference video to read before generation")
+          .setRequired(false)
       ),
     new SlashCommandBuilder()
       .setName("support")
@@ -2861,7 +2922,7 @@ client.on("interactionCreate", async (interaction) => {
       if (action !== "confirm") return;
       pendingVideoRequests.delete(requestId);
       await interaction.update({
-        content: `動画生成を開始しました。\nquality: ${request.quality}\nsize: ${request.size}\nduration: ${request.duration}s`,
+        content: `動画生成を開始しました。\nquality: ${request.quality}\nsize: ${request.size}\nduration: ${request.duration}s${request.videoAttachment ? "\n添付動画: 参照します" : ""}`,
         components: [],
       });
       try {
@@ -2869,6 +2930,7 @@ client.on("interactionCreate", async (interaction) => {
         await sendDirectVideoResultForUserWithOptions(channel, request.prompt, interaction.user.id, {
           size: request.size,
           duration: request.duration,
+          videoAttachment: request.videoAttachment,
         });
         await interaction.followUp({ content: "動画生成が完了しました。結果はこのチャンネルに投稿しました。", flags: 64 });
       } catch (error) {
@@ -3019,6 +3081,11 @@ client.on("interactionCreate", async (interaction) => {
       const quality = interaction.options.getString("quality") || DEFAULT_VIDEO_QUALITY;
       const duration = normalizeVideoDurationSeconds(interaction.options.getInteger("duration") || DEFAULT_VIDEO_DURATION_SECONDS);
       const size = videoQualityToSize(quality);
+      const referenceVideo = interaction.options.getAttachment("reference_video");
+      if (referenceVideo && !isVideoAttachment(referenceVideo)) {
+        await interaction.reply({ content: "reference_video には mp4 / mov / webm などの動画ファイルを添付してください。", flags: 64 });
+        return;
+      }
       const requestId = crypto.randomBytes(12).toString("hex");
       pendingVideoRequests.set(requestId, {
         userId: interaction.user.id,
@@ -3027,6 +3094,9 @@ client.on("interactionCreate", async (interaction) => {
         quality: size.quality,
         size: size.size,
         duration,
+        videoAttachment: referenceVideo
+          ? { url: referenceVideo.url, name: referenceVideo.name, contentType: referenceVideo.contentType, size: referenceVideo.size }
+          : null,
         expiresAt: Date.now() + 10 * 60 * 1000,
       });
       const row = new ActionRowBuilder().addComponents(
@@ -3040,6 +3110,7 @@ client.on("interactionCreate", async (interaction) => {
           "\u9ad8\u753b\u8cea\u30fb\u9577\u6642\u9593\u307b\u3069\u6599\u91d1\u304c\u5927\u304d\u304f\u5897\u3048\u307e\u3059\u3002\n" +
           SUPPORT_NOTICE +
           "\n\n" +
+          (referenceVideo ? `reference_video: ${referenceVideo.name || "attached video"}\n` : "") +
           `quality: ${size.quality}\n` +
           `size: ${size.size}\n` +
           `duration: ${duration}s\n` +
@@ -3200,7 +3271,9 @@ client.on("messageCreate", async (message) => {
     session.busy = true;
     await message.reply(`動画生成リクエストを受け付けました。生成中...\n\n${SUPPORT_NOTICE}`);
     try {
-      await sendDirectVideoResultForUser(message.channel, content, message.author.id);
+      await sendDirectVideoResultForUserWithOptions(message.channel, content, message.author.id, {
+        videoAttachment: findVideoAttachment(message.attachments),
+      });
       session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
       session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });
       session.history.splice(0, Math.max(0, session.history.length - 24));
@@ -3222,7 +3295,9 @@ client.on("messageCreate", async (message) => {
     if (session) session.busy = true;
     await message.reply(`動画生成リクエストを受け付けました。生成中...\n\n${SUPPORT_NOTICE}`);
     try {
-      await sendDirectVideoResultForUser(message.channel, content, message.author.id);
+      await sendDirectVideoResultForUserWithOptions(message.channel, content, message.author.id, {
+        videoAttachment: findVideoAttachment(message.attachments),
+      });
       if (session) {
         session.history.push({ role: "user", content: `${message.member?.displayName || message.author.username}: ${content}` });
         session.history.push({ role: "assistant", content: "動画を生成して投稿しました。" });

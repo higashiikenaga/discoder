@@ -360,6 +360,14 @@ function shouldFallbackToOpenRouterMedia(error, userId, kind) {
   return Boolean(config.apiKey && config.fallbackEnabled && provider !== "puter" && isPuterAiCreditLimitError(error));
 }
 
+function mediaRouteLabel(userId, kind, puterModel) {
+  const config = openRouterMediaConfig(userId);
+  const provider = config[`${kind}Provider`] || "auto";
+  if (provider === "openrouter") return `OpenRouter ${config[`${kind}Model`]}`;
+  if (provider === "auto") return `Puter ${puterModel} → OpenRouter ${config[`${kind}Model`]}`;
+  return `Puter ${puterModel}`;
+}
+
 function normalizeVideoSize(value = OPENROUTER_VIDEO_SIZE) {
   const raw = String(value || OPENROUTER_VIDEO_SIZE).trim().toLowerCase().replace(/\s+/g, "");
   if (VIDEO_QUALITY_SIZES[raw]) {
@@ -2406,14 +2414,15 @@ async function sendTalkVideoResult(session, text, userId = null, options = {}) {
   const requestedSize = options.size ? normalizeVideoSize(options.size) : extractVideoSize(text, openRouterMediaConfig(userId).videoSize);
   const requestedDuration = normalizeVideoDurationSeconds(options.duration || DEFAULT_VIDEO_DURATION_SECONDS);
   const notice = sora2MigrationNotice();
-  console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} model=${model}`);
+  const routeLabel = mediaRouteLabel(userId, "video", model);
+  console.log(`[talk] txt2vid route prompt=${prompt.slice(0, 200)} route=${routeLabel}`);
   const loading = await sendLoadingMessage(
     session.textChannel,
-    `動画を生成中... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``,
-    `動画を生成中... モデル: \`${model}\`\n${notice}`
+    `動画を生成中... 経路: \`${routeLabel}\`\n${notice}\n\`${prompt.slice(0, 160)}\``,
+    `動画を生成中... 経路: \`${routeLabel}\`\n${notice}`
   );
   try {
-    await loading.message.edit(`動画生成APIを呼び出しています... モデル: \`${model}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
+    await loading.message.edit(`動画生成APIを呼び出しています... 経路: \`${routeLabel}\`\n${notice}\n\`${prompt.slice(0, 160)}\``).catch(() => {});
     let result;
     let usageLine = "";
     try {

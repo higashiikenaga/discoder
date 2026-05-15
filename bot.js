@@ -2468,6 +2468,13 @@ async function sendDirectVideoResultForUserWithOptions(channel, text, userId, op
   await sendTalkVideoResult({ textChannel: channel }, text, userId, options);
 }
 
+async function resolveInteractionTextChannel(interaction, channelId = interaction.channelId) {
+  if (interaction.channel?.send) return interaction.channel;
+  const channel = await client.channels.fetch(channelId).catch(() => null);
+  if (channel?.send) return channel;
+  throw new Error("動画を投稿するチャンネルを取得できませんでした。Botにチャンネル閲覧・メッセージ送信権限があるか確認してください。");
+}
+
 async function sendTalkImageTextResult(session, text, attachments, userId = null) {
   const image = attachments.find((attachment) => attachment.contentType?.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|tiff?)($|\?)/i.test(attachment.url));
   if (!image) {
@@ -2804,7 +2811,8 @@ client.on("interactionCreate", async (interaction) => {
         components: [],
       });
       try {
-        await sendDirectVideoResultForUserWithOptions(interaction.channel, request.prompt, interaction.user.id, {
+        const channel = await resolveInteractionTextChannel(interaction, request.channelId);
+        await sendDirectVideoResultForUserWithOptions(channel, request.prompt, interaction.user.id, {
           size: request.size,
           duration: request.duration,
         });

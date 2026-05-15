@@ -364,6 +364,16 @@ function shouldFallbackToOpenRouterMedia(error, userId, kind) {
 
 function normalizeVideoSize(value = OPENROUTER_VIDEO_SIZE) {
   const raw = String(value || OPENROUTER_VIDEO_SIZE).trim().toLowerCase().replace(/\s+/g, "");
+  if (VIDEO_QUALITY_SIZES[raw]) {
+    const size = videoQualityToSize(raw);
+    return {
+      size: size.size,
+      width: size.width,
+      height: size.height,
+      resolution: size.quality,
+      aspectRatio: aspectRatioForSize(size.width, size.height),
+    };
+  }
   const aliases = {
     low: OPENROUTER_VIDEO_SIZE,
     hd: "1280x720",

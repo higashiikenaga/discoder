@@ -2,6 +2,16 @@
 
 Discord.py bot that generates code with Gemini and sends the finished code back as files.
 
+## Support / OFUSE
+
+DisCoderをご利用いただき、ありがとうございます。
+DisCoderは実験中のAI Discord Botです。
+TTSや開発用のAPIなど、一部機能には開発者側のAI APIの利用料金も発生します。
+開発・運用費の支援はこちら：
+OFUSE: https://ofuse.me/a753ea67
+
+支援は任意です。ありがとうございます。
+
 ## Setup
 
 ```powershell
@@ -76,6 +86,7 @@ Discordでは次を使います。
 /drive connect
 /drive status
 /drive disconnect
+/support
 /talk leave
 ```
 

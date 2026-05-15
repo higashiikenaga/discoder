@@ -143,6 +143,15 @@ const VIDEO_QUALITY_SIZES = {
 const DEFAULT_VIDEO_QUALITY = "480p";
 const DEFAULT_VIDEO_DURATION_SECONDS = 3;
 const MAX_VIDEO_DURATION_SECONDS = 5;
+const SUPPORT_MESSAGE = [
+  "DisCoderをご利用いただき、ありがとうございます。",
+  "DisCoderは実験中のAI Discord Botです。",
+  "TTSや開発用のAPIなど、一部機能には開発者側のAI APIの利用料金も発生します。",
+  "開発・運用費の支援はこちら：",
+  "OFUSE: https://ofuse.me/a753ea67",
+  "",
+  "支援は任意です。ありがとうございます。",
+].join("\n");
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
   "Python",
@@ -2725,6 +2734,9 @@ client.once("clientReady", async () => {
           .setMaxValue(MAX_VIDEO_DURATION_SECONDS)
       ),
     new SlashCommandBuilder()
+      .setName("support")
+      .setDescription("DisCoderの開発・運用費支援について表示します"),
+    new SlashCommandBuilder()
       .setName("puter")
       .setDescription("Puterユーザー連携")
       .addSubcommand((sub) => sub.setName("connect").setDescription("自分のPuterアカウントをこのbotに連携します"))
@@ -2847,6 +2859,10 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
   if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === "support") {
+    await interaction.reply({ content: SUPPORT_MESSAGE, flags: 64 });
+    return;
+  }
   if (interaction.commandName === "coder") {
     await interaction.deferReply({ flags: 64 });
     try {

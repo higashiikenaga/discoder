@@ -157,6 +157,38 @@ const SUPPORT_NOTICE = [
   "TTSや開発用のAPIなど、一部機能には開発者側のAI APIの利用料金も発生します。",
   "開発・運用費の任意支援: https://ofuse.me/a753ea67",
 ].join("\n");
+const HELP_MESSAGE = [
+  "**DisCoder Help**",
+  "",
+  "**基本コマンド**",
+  "`/coder` コードや小さなプロジェクトを生成します。",
+  "`/review` コードレビューをします。ファイル添付も使えます。",
+  "`/debug` エラーやログから原因を分析します。",
+  "`/generate feature` 機能追加を生成します。",
+  "`/video` 動画生成。実行前に高コスト警告と確認ボタンが出ます。",
+  "",
+  "**VCの使い方**",
+  "`/talk join` VCに参加します。未指定なら自分がいるVCを使います。",
+  "`/talk mode mode:雑談モード` 雑談寄りに切り替えます。",
+  "`/talk mode mode:コーディングモード` 開発支援寄りに切り替えます。",
+  "`/talk leave` VCから退出します。",
+  "VC中は「コーダーたん！」と呼ぶか、Botにメンションして話しかけてください。",
+  "",
+  "**OpenRouter連携**",
+  "`/openrouter connect api_key:<自分のAPIキー>` ユーザー個別のOpenRouterキーを保存します。",
+  "`/openrouter media kind:video provider:openrouter model:bytedance/seedance-2.0-fast` 動画のフォールバック先を設定します。",
+  "`/openrouter status` 設定を確認します。",
+  "`/openrouter disconnect` 保存したAPIキーを削除します。",
+  "Puter上限時は、設定済みならユーザー個別のOpenRouterへフォールバックします。",
+  "",
+  "**Puter / Drive / 支援**",
+  "`/puter connect` 自分のPuterアカウントを連携します。",
+  "`/drive connect` Google Drive保存を連携します。",
+  "`/support` OFUSE支援案内を表示します。",
+  "規約: `Terms.md` / プライバシー: `privacy-policy.md`",
+  "",
+  SUPPORT_NOTICE,
+].join("\n");
 const LANGUAGE_CHOICES = [
   "HTML/CSS/JavaScript",
   "Python",
@@ -2744,6 +2776,9 @@ client.once("clientReady", async () => {
       .setName("support")
       .setDescription("DisCoderの開発・運用費支援について表示します"),
     new SlashCommandBuilder()
+      .setName("help")
+      .setDescription("DisCoderのコマンド、VC、OpenRouter連携の使い方を表示します"),
+    new SlashCommandBuilder()
       .setName("puter")
       .setDescription("Puterユーザー連携")
       .addSubcommand((sub) => sub.setName("connect").setDescription("自分のPuterアカウントをこのbotに連携します"))
@@ -2868,6 +2903,10 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "support") {
     await interaction.reply({ content: SUPPORT_MESSAGE, flags: 64 });
+    return;
+  }
+  if (interaction.commandName === "help") {
+    await interaction.reply({ content: HELP_MESSAGE, flags: 64 });
     return;
   }
   if (interaction.commandName === "coder") {

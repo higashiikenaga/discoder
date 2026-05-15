@@ -86,6 +86,7 @@ Discordでは次を使います。
 /drive connect
 /drive status
 /drive disconnect
+/help
 /support
 /talk leave
 ```
